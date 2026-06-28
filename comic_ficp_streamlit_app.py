@@ -121,7 +121,6 @@ DEFAULT_SPECIFIC_COLUMNS = [
     "C:Grade",
     "C:Intended Audience",
     "C:Book Title",
-    "C:Unit Type",
 ]
 
 SPECIFIC_COLUMNS = DEFAULT_SPECIFIC_COLUMNS
@@ -1338,7 +1337,6 @@ def apply_free_shipping_rollup(
 
 DEFAULT_EXPORT_CONDITION_ID = "4000"
 DEFAULT_EXPORT_CONDITION_NAME = "Very Good"
-DEFAULT_EXPORT_UNIT_TYPE = "Book"
 
 
 def apply_export_condition_id_policy(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1406,13 +1404,17 @@ def apply_export_picurl_policy(frame: pd.DataFrame) -> pd.DataFrame:
 
 def apply_export_unit_type_policy(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
+    if "C:Unit Type" not in result.columns and "C:Unit Quantity" not in result.columns:
+        return result
     if "C:Unit Type" not in result.columns:
         result["C:Unit Type"] = ""
     if "C:Unit Quantity" not in result.columns:
         result["C:Unit Quantity"] = ""
 
     audit_columns = [
+        "Original Unit Quantity",
         "Original Unit Type",
+        "Applied Unit Quantity",
         "Applied Unit Type",
         "Unit Type Fix Status",
     ]
@@ -1421,27 +1423,19 @@ def apply_export_unit_type_policy(frame: pd.DataFrame) -> pd.DataFrame:
             result[column] = ""
 
     for index, row in result.iterrows():
+        original_unit_quantity = get_row_value(row, "C:Unit Quantity")
         original_unit_type = get_row_value(row, "C:Unit Type")
-        unit_quantity = get_row_value(row, "C:Unit Quantity")
-        detected_count = get_row_value(row, "Detected Book Count")
 
+        result.at[index, "Original Unit Quantity"] = original_unit_quantity
         result.at[index, "Original Unit Type"] = original_unit_type
-        if is_blank(unit_quantity) and not is_blank(detected_count):
-            result.at[index, "C:Unit Quantity"] = str(detected_count).strip()
-            unit_quantity = str(detected_count).strip()
-
-        if is_blank(unit_quantity):
-            result.at[index, "Applied Unit Type"] = original_unit_type
-            result.at[index, "Unit Type Fix Status"] = "skipped: unit quantity is missing"
-            continue
-
-        if is_replaceable_specific_value("C:Unit Type", original_unit_type):
-            result.at[index, "C:Unit Type"] = DEFAULT_EXPORT_UNIT_TYPE
-            result.at[index, "Applied Unit Type"] = DEFAULT_EXPORT_UNIT_TYPE
-            result.at[index, "Unit Type Fix Status"] = "fixed: set unit type to Book"
+        result.at[index, "C:Unit Quantity"] = ""
+        result.at[index, "C:Unit Type"] = ""
+        result.at[index, "Applied Unit Quantity"] = ""
+        result.at[index, "Applied Unit Type"] = ""
+        if is_blank(original_unit_quantity) and is_blank(original_unit_type):
+            result.at[index, "Unit Type Fix Status"] = "kept blank: unit price display disabled"
         else:
-            result.at[index, "Applied Unit Type"] = original_unit_type
-            result.at[index, "Unit Type Fix Status"] = "kept"
+            result.at[index, "Unit Type Fix Status"] = "cleared: unit price display disabled"
 
     return result
 
@@ -4038,7 +4032,6 @@ def infer_specifics_with_notes(
     add_specific_value(specifics, notes, specific_columns, ["Tradition"], "Manga", "manga set workflow")
     add_specific_value(specifics, notes, specific_columns, ["Topic"], "Manga", "manga set workflow")
     add_specific_value(specifics, notes, specific_columns, ["Unit of Sale"], "Comic Book Lot", "multi-volume set workflow")
-    add_specific_value(specifics, notes, specific_columns, ["Unit Type"], DEFAULT_EXPORT_UNIT_TYPE, "unit price display label")
     add_specific_value(specifics, notes, specific_columns, ["Signed"], signed, "signature evidence/default")
     add_specific_value(specifics, notes, specific_columns, ["Personalized", "Personalize"], "No", "no personalization evidence")
     add_specific_value(specifics, notes, specific_columns, ["Inscribed"], "No", "no inscription evidence")
@@ -4094,7 +4087,7 @@ def infer_specifics_with_notes(
     add_specific_value(specifics, notes, specific_columns, ["Style"], style, "manga print style inference")
     add_specific_value(specifics, notes, specific_columns, ["Character"], characters or ("Various" if book_count and book_count > 1 else ""), "series/reference evidence")
     if book_count:
-        add_specific_value(specifics, notes, specific_columns, ["Number of Books", "Number of Items", "Unit Quantity"], str(book_count), "detected book count")
+        add_specific_value(specifics, notes, specific_columns, ["Number of Books", "Number of Items"], str(book_count), "detected book count")
         add_specific_value(specifics, notes, specific_columns, ["Issue Number", "Volume"], volume_range or "Various", "detected volume range/set")
     if weight_kg:
         add_specific_value(specifics, notes, specific_columns, ["Item Weight", "Weight"], f"{weight_kg:.2f} kg", "estimated manga set weight")
