@@ -1,0 +1,14 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+*.log
+*.err.log
+*.out.log
+.streamlit/secrets.toml
+node_modules
+.env
+*.csv
+*.xlsx
+*.xls
+*.pdf
