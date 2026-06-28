@@ -62,6 +62,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     detect_unlistable_listing_issue,
     estimate_book_weight_g,
     estimate_packaging_weight_kg,
+    extract_json_object,
     extract_buyer_relevant_listing_details,
     fetch_usd_jpy_exchange_rate,
     get_uploaded_or_cached_csv,
@@ -74,6 +75,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     load_saved_api_key,
     load_public_saved_api_key,
     parse_mercari_rendered_listing,
+    parse_ai_enrichment_payload,
     process_dataframe,
     redact_sensitive_text,
     authenticate_public_user,
@@ -376,6 +378,47 @@ class ComicFicpLogicTest(unittest.TestCase):
 
         self.assertEqual(len(export), 1)
         self.assertEqual(export.iloc[0]["Title"], "OK row")
+
+    def test_diagnose_processed_row_keeps_browser_fetch_warning_when_shipping_ready(self):
+        row = pd.Series(
+            {
+                "Title": "Manga Set Volumes 1-10",
+                "Listing Eligibility": "OK",
+                "Scrape Status": "ok; browser fetch failed: Page.goto timeout",
+                "Detected Book Count": "10",
+                "Book Count Evidence": "Volumes 1-10",
+                "Billable Weight kg": "2.100",
+                "FICP Shipping USD": "26.69",
+                "FICP Shipping JPY": "4319",
+                "Main Image URL": "https://example.com/image.jpg",
+                "AI Enrichment Status": "parse error: Extra data: line 2 column 1",
+            }
+        )
+
+        diagnostics = diagnose_processed_row(row)
+
+        self.assertEqual(diagnostics["result"], "成功")
+        self.assertEqual(diagnostics["needs_review"], "No")
+        self.assertIn("ブラウザ取得は失敗", diagnostics["diagnostics"])
+        self.assertIn("AI補完は任意処理", diagnostics["diagnostics"])
+
+    def test_extract_json_object_uses_first_balanced_object(self):
+        raw = '{"description_notes":["ok"]}\n{"extra": true}'
+
+        self.assertEqual(extract_json_object(raw), '{"description_notes":["ok"]}')
+
+    def test_parse_ai_enrichment_payload_accepts_json_with_trailing_text(self):
+        raw = (
+            '{"book_count":null,"description_notes":["Unread condition."],'
+            '"specifics":{"C:Genre":"Sports"},"notes":["genre evidence"]}'
+            '\n{"unused": true}'
+        )
+
+        result = parse_ai_enrichment_payload(raw, "gemini", "gemini-test", ["C:Genre"])
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.description_notes, ["Unread condition."])
+        self.assertEqual(result.specifics["C:Genre"], "Sports")
 
     def test_ebay_preflight_table_flags_common_upload_risks(self):
         source = pd.DataFrame(
@@ -1659,7 +1702,8 @@ class ComicFicpLogicTest(unittest.TestCase):
 
         self.assertNotIn(secret, diagnostics["review_reason"])
         self.assertNotIn(secret, diagnostics["diagnostics"])
-        self.assertIn("key=[redacted]", diagnostics["review_reason"])
+        self.assertEqual(diagnostics["needs_review"], "No")
+        self.assertIn("key=[redacted]", diagnostics["diagnostics"])
 
     def test_redact_sensitive_text_masks_common_api_key_forms(self):
         secret = "AIzaSyDUMMYSECRETKEYVALUE123456789"

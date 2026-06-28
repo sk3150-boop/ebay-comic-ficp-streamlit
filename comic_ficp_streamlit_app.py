@@ -1608,6 +1608,7 @@ def diagnose_processed_row(row: pd.Series) -> dict[str, str]:
     image_url = get_row_value(row, "Main Image URL")
     ai_status = redact_sensitive_text(get_row_value(row, "AI Enrichment Status"))
     ai_status_lower = ai_status.lower()
+    core_pricing_ready = bool(book_count and billable_weight and shipping_usd)
 
     details: list[str] = []
     review_reasons: list[str] = []
@@ -1625,7 +1626,10 @@ def diagnose_processed_row(row: pd.Series) -> dict[str, str]:
     if status:
         details.append(f"商品情報取得: {status}")
     if re.search(r"failed|error|unsupported|missing|no url|not found", status_lower):
-        review_reasons.append(f"商品情報取得に注意: {status}")
+        if "browser fetch failed" in status_lower and core_pricing_ready:
+            details.append("公開ページのブラウザ取得は失敗しましたが、CSV内情報と取得済み情報で冊数・重量・送料を計算済みです。")
+        else:
+            review_reasons.append(f"商品情報取得に注意: {status}")
 
     if book_count:
         evidence = get_row_value(row, "Book Count Evidence")
@@ -1654,7 +1658,7 @@ def diagnose_processed_row(row: pd.Series) -> dict[str, str]:
         review_reasons.append("画像未取得")
 
     if ai_status and re.search(r"error|parse error|missing api key", ai_status_lower):
-        review_reasons.append(f"AI補完: {ai_status}")
+        details.append(f"AI補完は任意処理のため未反映: {ai_status}")
     elif ai_status:
         details.append(f"AI補完: {ai_status}")
 
@@ -3308,10 +3312,13 @@ def extract_json_object(text: str) -> str:
     source = str(text or "").strip()
     source = re.sub(r"^```(?:json)?\s*", "", source, flags=re.I)
     source = re.sub(r"\s*```$", "", source)
-    start = source.find("{")
-    end = source.rfind("}")
-    if start >= 0 and end > start:
-        return source[start : end + 1]
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", source):
+        try:
+            _, end = decoder.raw_decode(source[match.start() :])
+            return source[match.start() : match.start() + end]
+        except Exception:
+            continue
     return source
 
 
