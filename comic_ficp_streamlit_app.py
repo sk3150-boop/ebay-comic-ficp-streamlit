@@ -121,6 +121,7 @@ DEFAULT_SPECIFIC_COLUMNS = [
     "C:Grade",
     "C:Intended Audience",
     "C:Book Title",
+    "C:Unit Type",
 ]
 
 SPECIFIC_COLUMNS = DEFAULT_SPECIFIC_COLUMNS
@@ -156,6 +157,7 @@ SPECIFIC_DISPLAY_LABELS = {
     "C:Number of Books": "Number of Books",
     "C:Number of Items": "Number of Items",
     "C:Unit Quantity": "Unit Quantity",
+    "C:Unit Type": "Unit Type",
     "C:Item Weight": "Item Weight",
     "C:ISBN": "ISBN",
     "C:Publication Year": "Publication Year",
@@ -1336,6 +1338,7 @@ def apply_free_shipping_rollup(
 
 DEFAULT_EXPORT_CONDITION_ID = "4000"
 DEFAULT_EXPORT_CONDITION_NAME = "Very Good"
+DEFAULT_EXPORT_UNIT_TYPE = "Book"
 
 
 def apply_export_condition_id_policy(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1401,6 +1404,48 @@ def apply_export_picurl_policy(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def apply_export_unit_type_policy(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "C:Unit Type" not in result.columns:
+        result["C:Unit Type"] = ""
+    if "C:Unit Quantity" not in result.columns:
+        result["C:Unit Quantity"] = ""
+
+    audit_columns = [
+        "Original Unit Type",
+        "Applied Unit Type",
+        "Unit Type Fix Status",
+    ]
+    for column in audit_columns:
+        if column not in result.columns:
+            result[column] = ""
+
+    for index, row in result.iterrows():
+        original_unit_type = get_row_value(row, "C:Unit Type")
+        unit_quantity = get_row_value(row, "C:Unit Quantity")
+        detected_count = get_row_value(row, "Detected Book Count")
+
+        result.at[index, "Original Unit Type"] = original_unit_type
+        if is_blank(unit_quantity) and not is_blank(detected_count):
+            result.at[index, "C:Unit Quantity"] = str(detected_count).strip()
+            unit_quantity = str(detected_count).strip()
+
+        if is_blank(unit_quantity):
+            result.at[index, "Applied Unit Type"] = original_unit_type
+            result.at[index, "Unit Type Fix Status"] = "skipped: unit quantity is missing"
+            continue
+
+        if is_replaceable_specific_value("C:Unit Type", original_unit_type):
+            result.at[index, "C:Unit Type"] = DEFAULT_EXPORT_UNIT_TYPE
+            result.at[index, "Applied Unit Type"] = DEFAULT_EXPORT_UNIT_TYPE
+            result.at[index, "Unit Type Fix Status"] = "fixed: set unit type to Book"
+        else:
+            result.at[index, "Applied Unit Type"] = original_unit_type
+            result.at[index, "Unit Type Fix Status"] = "kept"
+
+    return result
+
+
 def build_export_eligibility_mask(frame: pd.DataFrame) -> pd.Series:
     export_mask = pd.Series(True, index=frame.index)
     if "Listing Eligibility" in frame.columns:
@@ -1420,6 +1465,7 @@ def build_export_dataframe(
     export_frame = frame.loc[export_mask].copy()
     export_frame = apply_export_picurl_policy(export_frame)
     export_frame = apply_export_condition_id_policy(export_frame)
+    export_frame = apply_export_unit_type_policy(export_frame)
     if free_shipping_rollup and free_shipping_rollup.enabled:
         export_frame = apply_free_shipping_rollup(export_frame, free_shipping_rollup)
     return export_frame
@@ -3992,6 +4038,7 @@ def infer_specifics_with_notes(
     add_specific_value(specifics, notes, specific_columns, ["Tradition"], "Manga", "manga set workflow")
     add_specific_value(specifics, notes, specific_columns, ["Topic"], "Manga", "manga set workflow")
     add_specific_value(specifics, notes, specific_columns, ["Unit of Sale"], "Comic Book Lot", "multi-volume set workflow")
+    add_specific_value(specifics, notes, specific_columns, ["Unit Type"], DEFAULT_EXPORT_UNIT_TYPE, "unit price display label")
     add_specific_value(specifics, notes, specific_columns, ["Signed"], signed, "signature evidence/default")
     add_specific_value(specifics, notes, specific_columns, ["Personalized", "Personalize"], "No", "no personalization evidence")
     add_specific_value(specifics, notes, specific_columns, ["Inscribed"], "No", "no inscription evidence")

@@ -321,6 +321,41 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertEqual(export.loc[0, "Applied ConditionID"], "4000")
         self.assertIn("Very Good", export.loc[0, "ConditionID Fix Status"])
 
+    def test_build_export_dataframe_replaces_na_unit_type_with_book(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Title": "Manga set",
+                    "Detected Book Count": "17",
+                    "C:Unit Quantity": "17",
+                    "C:Unit Type": "NA",
+                }
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(export.loc[0, "C:Unit Type"], "Book")
+        self.assertEqual(export.loc[0, "Applied Unit Type"], "Book")
+        self.assertIn("fixed", export.loc[0, "Unit Type Fix Status"])
+
+    def test_build_export_dataframe_uses_detected_count_for_missing_unit_quantity(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Title": "Manga set",
+                    "Detected Book Count": "8",
+                    "C:Unit Quantity": "NA",
+                    "C:Unit Type": "NA",
+                }
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(export.loc[0, "C:Unit Quantity"], "8")
+        self.assertEqual(export.loc[0, "C:Unit Type"], "Book")
+
     def test_build_export_dataframe_writes_all_source_images_to_picurl(self):
         frame = pd.DataFrame(
             [
@@ -1881,6 +1916,7 @@ class ComicFicpLogicTest(unittest.TestCase):
                     "C:Topic": "NA",
                     "C:Tradition": "NA",
                     "C:Unit of Sale": "NA",
+                    "C:Unit Type": "NA",
                     "C:Number of Books": "NA",
                     "C:Item Weight": "NA",
                     "C:ISBN": "NA",
@@ -1917,6 +1953,7 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertEqual(result.loc[0, "C:Topic"], "Manga")
         self.assertEqual(result.loc[0, "C:Tradition"], "Manga")
         self.assertEqual(result.loc[0, "C:Unit of Sale"], "Comic Book Lot")
+        self.assertEqual(result.loc[0, "C:Unit Type"], "Book")
         self.assertEqual(result.loc[0, "C:Number of Books"], "16")
         self.assertEqual(result.loc[0, "C:Item Weight"], "3.38 kg")
         self.assertEqual(result.loc[0, "C:ISBN"], "Does Not Apply")
