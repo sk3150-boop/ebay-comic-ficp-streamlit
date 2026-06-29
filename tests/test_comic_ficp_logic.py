@@ -2165,6 +2165,51 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertTrue(preview_urls[0].endswith("m12345678901_1.jpg?1782201200"))
         self.assertTrue(preview_urls[1].endswith("m12345678901_2.jpg?1782201200"))
 
+    def test_process_dataframe_preserves_multiple_scraped_image_urls(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "PicURL": "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?1782201200",
+                    "Title": "Sample Manga Volumes 1-12 Set",
+                    "Description": "",
+                }
+            ]
+        )
+        scraped = ListingData(
+            title="Sample Manga Volumes 1-12 Set",
+            image_url="https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?1782201200",
+            image_urls=[
+                "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?1782201200",
+                "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?1782201200",
+                "https://static.mercdn.net/item/detail/orig/photos/m12345678901_3.jpg?1782201200",
+            ],
+            description="",
+            details_text="",
+            status="ok",
+        )
+        config = ProcessingConfig(
+            url_col="PicURL",
+            image_col="PicURL",
+            title_col="Title",
+            description_col="Description",
+            zone="F",
+            enable_scrape=True,
+            enable_browser_scrape=False,
+            request_delay_seconds=0,
+        )
+
+        with patch("comic_ficp_streamlit_app.scrape_listing", return_value=scraped):
+            result = process_dataframe(frame, config)
+
+        self.assertIn("m12345678901_2.jpg", result.loc[0, "Source Image URLs"])
+        self.assertIn("m12345678901_3.jpg", result.loc[0, "Source Image URLs"])
+        preview_urls = build_preview_image_urls(result.loc[0], "PicURL")
+        self.assertEqual(len(preview_urls), 3)
+
+        export = build_export_dataframe(result, FreeShippingRollupOptions(enabled=False))
+        self.assertEqual(export.loc[0, "Applied PicURL Image Count"], "3")
+        self.assertIn("m12345678901_3.jpg", export.loc[0, "PicURL"])
+
     def test_process_dataframe_keeps_existing_url_before_inferred_url(self):
         frame = pd.DataFrame(
             [

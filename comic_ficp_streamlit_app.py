@@ -338,6 +338,7 @@ class ListingData:
     title: str = ""
     price: str = ""
     image_url: str = ""
+    image_urls: list[str] = field(default_factory=list)
     description: str = ""
     details_text: str = ""
     status: str = "not fetched"
@@ -1031,29 +1032,19 @@ def first_nonblank(*values: object) -> str:
 
 
 def parse_image_urls(value: object) -> list[str]:
-    source = str(value or "")
-    return [
+    source = unescape(str(value or ""))
+    source = source.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/")
+    candidates = [
         part.strip()
         for part in re.split(r"[|,;\s]+", source)
         if re.match(r"^https?://", part.strip(), flags=re.I)
     ]
-
-
-def contains_likely_image_url(value: object) -> bool:
-    return any(is_likely_image_url(url) for url in parse_image_urls(value))
-
-
-def build_preview_image_urls(row: pd.Series, image_col: str) -> list[str]:
-    candidates = [
-        get_row_value(row, "Main Image URL"),
-        *parse_image_urls(get_row_value(row, image_col)),
-        *parse_image_urls(get_row_value(row, "Source Image URLs")),
-    ]
+    candidates.extend(re.findall(r"https?://[^\s\"'<>|,;]+", source, flags=re.I))
     result: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
-        url = str(candidate or "").strip()
-        if not is_likely_image_url(url):
+        url = str(candidate or "").strip().rstrip(")]}。、，,.;")
+        if not re.match(r"^https?://", url, flags=re.I):
             continue
         key = url.split("?", 1)[0].lower()
         if key in seen:
@@ -1061,6 +1052,42 @@ def build_preview_image_urls(row: pd.Series, image_col: str) -> list[str]:
         seen.add(key)
         result.append(url)
     return result
+
+
+def merge_image_url_values(*values: object, max_images: int = 24) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, (list, tuple, set)):
+            candidates = []
+            for item in value:
+                candidates.extend(parse_image_urls(item))
+        else:
+            candidates = parse_image_urls(value)
+        for candidate in candidates:
+            url = str(candidate or "").strip()
+            if not is_likely_image_url(url):
+                continue
+            key = url.split("?", 1)[0].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(url)
+            if len(result) >= max_images:
+                return result
+    return result
+
+
+def contains_likely_image_url(value: object) -> bool:
+    return any(is_likely_image_url(url) for url in parse_image_urls(value))
+
+
+def build_preview_image_urls(row: pd.Series, image_col: str) -> list[str]:
+    return merge_image_url_values(
+        get_row_value(row, "Main Image URL"),
+        get_row_value(row, image_col),
+        get_row_value(row, "Source Image URLs"),
+    )
 
 
 def build_table_image_url(row: pd.Series, image_col: str) -> str:
@@ -1069,25 +1096,12 @@ def build_table_image_url(row: pd.Series, image_col: str) -> str:
 
 
 def collect_export_pic_urls(row: pd.Series, max_images: int = 24) -> list[str]:
-    candidates = [
+    return merge_image_url_values(
         get_row_value(row, "Main Image URL"),
-        *parse_image_urls(get_row_value(row, "PicURL")),
-        *parse_image_urls(get_row_value(row, "Source Image URLs")),
-    ]
-    result: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        url = str(candidate or "").strip()
-        if not is_likely_image_url(url):
-            continue
-        key = url.split("?", 1)[0].lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(url)
-        if len(result) >= max_images:
-            break
-    return result
+        get_row_value(row, "PicURL"),
+        get_row_value(row, "Source Image URLs"),
+        max_images=max_images,
+    )
 
 
 def is_likely_image_url(url: object) -> bool:
@@ -2702,6 +2716,7 @@ def parse_mercari_rendered_listing(
     page_title: str,
     body_text: str,
     image_url: str = "",
+    image_urls: Optional[Iterable[str]] = None,
 ) -> ListingData:
     title = clean_text(re.sub(r"\s*-\s*メルカリ\s*$", "", page_title or ""))
     price_match = re.search(r"[\u00a5\uffe5]\s*([0-9,]+)", body_text or "")
@@ -2716,10 +2731,12 @@ def parse_mercari_rendered_listing(
     )
     details_parts = [part for part in [description, f"商品の状態 {condition}" if condition else "", item_info] if part]
     status = "ok (browser rendered)" if description or condition or item_info else "browser rendered: listing detail not found"
+    merged_image_urls = merge_image_url_values(image_url, list(image_urls or []))
     return ListingData(
         title=title[:300],
         price=clean_text(price)[:80],
-        image_url=clean_text(image_url),
+        image_url=first_nonblank(*merged_image_urls, image_url),
+        image_urls=merged_image_urls,
         description=description[:1800],
         details_text=clean_text("\n".join(details_parts))[:5000],
         status=status,
@@ -2777,22 +2794,34 @@ class BrowserListingScraper:
             meta_values = self._page.evaluate(
                 """() => ({
                     imageUrl: document.querySelector('meta[property="og:image"], meta[name="twitter:image"]')?.content || '',
+                    imageUrls: Array.from(new Set([
+                        document.querySelector('meta[property="og:image"], meta[name="twitter:image"]')?.content || '',
+                        ...Array.from(document.images || []).flatMap((img) => [
+                            img.currentSrc || '',
+                            img.src || '',
+                            img.getAttribute('data-src') || '',
+                            img.getAttribute('data-original') || ''
+                        ])
+                    ])).filter(Boolean),
                     price: document.querySelector('meta[property="product:price:amount"], meta[property="product:price"]')?.content || ''
                 })"""
             )
+            browser_image_urls = meta_values.get("imageUrls", []) if isinstance(meta_values, dict) else []
             listing = parse_mercari_rendered_listing(
                 url=url,
                 page_title=page_title,
                 body_text=body_text,
                 image_url=meta_values.get("imageUrl", "") if isinstance(meta_values, dict) else "",
+                image_urls=browser_image_urls if isinstance(browser_image_urls, list) else [],
             )
             if not listing.price and isinstance(meta_values, dict):
                 listing.price = clean_text(meta_values.get("price", ""))[:80]
-            if (not listing.price or not listing.image_url) and BeautifulSoup is not None:
+            if (not listing.price or not listing.image_url or len(listing.image_urls) <= 1) and BeautifulSoup is not None:
                 html = self._page.content()
                 static_payload = extract_listing_payload(BeautifulSoup(html, "lxml"), html)
                 listing.price = first_nonblank(listing.price, static_payload.price)
                 listing.image_url = first_nonblank(listing.image_url, static_payload.image_url)
+                listing.image_urls = merge_image_url_values(listing.image_urls, static_payload.image_urls, listing.image_url)
             return listing
         except Exception as error:
             return ListingData(source_url=url, status=f"browser fetch failed: {error}")
@@ -2886,6 +2915,7 @@ def extract_listing_payload(soup, html: str) -> ListingData:
         meta_content(soup, "property", "og:image"),
         meta_content(soup, "name", "twitter:image"),
     )
+    image_urls = collect_soup_image_urls(soup, html, primary_image_url=image_url)
     price = first_nonblank(
         meta_content(soup, "property", "product:price:amount"),
         meta_content(soup, "property", "product:price"),
@@ -2895,6 +2925,7 @@ def extract_listing_payload(soup, html: str) -> ListingData:
     title = first_nonblank(json_ld.get("title"), title)
     description = first_nonblank(json_ld.get("description"), description)
     image_url = first_nonblank(json_ld.get("image_url"), image_url)
+    image_urls = merge_image_url_values(image_url, image_urls, json_ld.get("image_urls", []))
     price = first_nonblank(json_ld.get("price"), price, regex_first(html, r'"price"\s*:\s*"?([0-9,]+)"?'))
 
     for tag in soup(["script", "style", "noscript"]):
@@ -2905,9 +2936,30 @@ def extract_listing_payload(soup, html: str) -> ListingData:
         title=clean_text(title)[:300],
         price=clean_text(price)[:80],
         image_url=clean_text(image_url),
+        image_urls=image_urls,
         description=clean_text(description)[:1800],
         details_text=visible_text[:5000],
     )
+
+
+def collect_soup_image_urls(soup, html: str, primary_image_url: str = "") -> list[str]:
+    candidates: list[object] = [primary_image_url]
+    for attr, value in [
+        ("property", "og:image"),
+        ("property", "og:image:secure_url"),
+        ("name", "twitter:image"),
+    ]:
+        content = meta_content(soup, attr, value)
+        if content:
+            candidates.append(content)
+    link = soup.find("link", attrs={"rel": re.compile(r"(?:^|\s)image_src(?:\s|$)", flags=re.I)})
+    if link:
+        candidates.append(link.get("href", ""))
+    for tag in soup.find_all("img"):
+        for attr in ("src", "currentSrc", "data-src", "data-original", "data-lazy-src", "srcset", "data-srcset"):
+            candidates.append(tag.get(attr, ""))
+    candidates.append(html)
+    return merge_image_url_values(candidates)
 
 
 def meta_content(soup, attr: str, value: str) -> str:
@@ -2920,8 +2972,8 @@ def regex_first(text: str, pattern: str) -> str:
     return clean_text(match.group(1)) if match else ""
 
 
-def extract_json_ld_product_data(soup) -> dict[str, str]:
-    result: dict[str, str] = {}
+def extract_json_ld_product_data(soup) -> dict[str, object]:
+    result: dict[str, object] = {}
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         raw = script.string or script.get_text() or ""
         if not raw.strip():
@@ -2941,9 +2993,14 @@ def extract_json_ld_product_data(soup) -> dict[str, str]:
             result["title"] = first_nonblank(result.get("title"), node.get("name"))
             result["description"] = first_nonblank(result.get("description"), node.get("description"))
             image = node.get("image")
+            image_candidates: list[object] = []
             if isinstance(image, list):
+                image_candidates.extend(image)
                 image = first_nonblank(*image)
+            elif image:
+                image_candidates.append(image)
             result["image_url"] = first_nonblank(result.get("image_url"), image)
+            result["image_urls"] = merge_image_url_values(result.get("image_urls", []), image_candidates)
             offers = node.get("offers")
             if isinstance(offers, list):
                 offers = offers[0] if offers else {}
@@ -5328,7 +5385,9 @@ def process_dataframe(
 
             title = first_nonblank(listing.title, csv_title)
             description = first_nonblank(listing.description, csv_description)
-            image_url = first_nonblank(listing.image_url, csv_image)
+            source_image_urls = merge_image_url_values(csv_image_urls, listing.image_url, listing.image_urls)
+            row["Source Image URLs"] = "|".join(source_image_urls)
+            image_url = first_nonblank(listing.image_url, *source_image_urls, csv_image)
             price = first_nonblank(listing.price, csv_price)
             combined_text = "\n".join(
                 str(part)
