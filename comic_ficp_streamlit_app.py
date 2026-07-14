@@ -784,48 +784,89 @@ def render_public_login_gate(st) -> bool:
     user = current_public_user(st)
     if user:
         with st.sidebar:
-            st.caption(f"ログイン中: {user['username']}")
-            if st.button("ログアウト", use_container_width=True):
+            st.markdown(
+                f'<div class="account-card"><span>ログイン中</span><strong>{html_escape(user["username"])}</strong></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("ログアウト", type="tertiary", icon=":material/logout:", use_container_width=True):
                 st.session_state.pop(PUBLIC_SESSION_USER_KEY, None)
                 clear_public_session_work_data(st)
                 st.rerun()
         return True
 
-    st.markdown("### ログイン")
-    st.caption("公開版では、CSVと処理結果は画面セッション内だけで扱います。AI APIキーだけ、ユーザー別に暗号化保存できます。")
-    tab_login, tab_signup = st.tabs(["ログイン", "新規登録"])
-    with tab_login:
-        login_username = st.text_input("ユーザー名", key="public_login_username")
-        login_password = st.text_input("パスワード", type="password", key="public_login_password")
-        if st.button("ログインする", type="primary", use_container_width=True):
-            authed, user_data, auth_message = authenticate_public_user(login_username, login_password, public_database_url())
-            if authed:
-                clear_public_session_work_data(st)
-                st.session_state[PUBLIC_SESSION_USER_KEY] = user_data
-                st.success(auth_message)
-                st.rerun()
-            else:
-                st.warning(auth_message)
-    with tab_signup:
-        signup_username = st.text_input("ユーザー名", key="public_signup_username")
-        signup_password = st.text_input("パスワード（8文字以上）", type="password", key="public_signup_password")
-        signup_password_confirm = st.text_input("パスワード確認", type="password", key="public_signup_password_confirm")
-        if st.button("アカウントを作成", use_container_width=True):
-            if signup_password != signup_password_confirm:
-                st.warning("確認用パスワードが一致しません。")
-            else:
-                created, create_message = create_public_user(signup_username, signup_password, public_database_url())
-                if created:
-                    authed, user_data, _ = authenticate_public_user(signup_username, signup_password, public_database_url())
+    st.markdown('<div class="login-heading"><span>SECURE WORKSPACE</span><h2>作業を始める</h2><p>アカウントごとに、安全な作業スペースを用意します。</p></div>', unsafe_allow_html=True)
+    login_info_col, login_form_col = st.columns([0.42, 0.58], gap="large", vertical_alignment="top")
+    with login_info_col:
+        st.markdown(
+            """
+            <div class="login-feature-card">
+              <div class="login-feature-kicker">このツールでできること</div>
+              <h3>CSVから出品準備まで、<br>ひとつの画面で。</h3>
+              <ul>
+                <li><span>01</span><div><strong>商品画像を安全確認</strong><small>同じ商品の画像だけを出力対象にします</small></div></li>
+                <li><span>02</span><div><strong>冊数・重量・送料を計算</strong><small>漫画セット向けのFICP送料を補完します</small></div></li>
+                <li><span>03</span><div><strong>要確認商品を見える化</strong><small>除外理由と判断根拠を一覧で確認できます</small></div></li>
+              </ul>
+              <div class="privacy-note">CSVと処理結果は、この画面のセッション内だけで扱います。</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with login_form_col:
+        with st.container(border=True):
+            tab_login, tab_signup = st.tabs(["ログイン", "はじめての方"])
+            with tab_login:
+                st.caption("登録済みのユーザー名とパスワードを入力してください。")
+                login_username = st.text_input("ユーザー名", key="public_login_username")
+                login_password = st.text_input("パスワード", type="password", key="public_login_password")
+                if st.button(
+                    "ログインして作業を続ける",
+                    type="primary",
+                    icon=":material/login:",
+                    use_container_width=True,
+                ):
+                    authed, user_data, auth_message = authenticate_public_user(
+                        login_username,
+                        login_password,
+                        public_database_url(),
+                    )
                     if authed:
                         clear_public_session_work_data(st)
                         st.session_state[PUBLIC_SESSION_USER_KEY] = user_data
-                        st.success(create_message)
+                        st.success(auth_message)
                         st.rerun()
                     else:
-                        st.success(create_message + " ログインしてください。")
-                else:
-                    st.warning(create_message)
+                        st.warning(auth_message)
+            with tab_signup:
+                st.caption("8文字以上のパスワードで、新しい作業スペースを作成します。")
+                signup_username = st.text_input("ユーザー名", key="public_signup_username")
+                signup_password = st.text_input("パスワード（8文字以上）", type="password", key="public_signup_password")
+                signup_password_confirm = st.text_input("パスワード確認", type="password", key="public_signup_password_confirm")
+                if st.button(
+                    "無料アカウントを作成",
+                    type="secondary",
+                    icon=":material/person_add:",
+                    use_container_width=True,
+                ):
+                    if signup_password != signup_password_confirm:
+                        st.warning("確認用パスワードが一致しません。")
+                    else:
+                        created, create_message = create_public_user(signup_username, signup_password, public_database_url())
+                        if created:
+                            authed, user_data, _ = authenticate_public_user(
+                                signup_username,
+                                signup_password,
+                                public_database_url(),
+                            )
+                            if authed:
+                                clear_public_session_work_data(st)
+                                st.session_state[PUBLIC_SESSION_USER_KEY] = user_data
+                                st.success(create_message)
+                                st.rerun()
+                            else:
+                                st.success(create_message + " ログインしてください。")
+                        else:
+                            st.warning(create_message)
     st.stop()
     return False
 
@@ -6014,41 +6055,167 @@ def get_uploaded_or_cached_csv(st, uploaded, persist: bool = True) -> tuple[byte
     return b"", "", False
 
 
-def main() -> None:  # pragma: no cover - UI smoke-tested manually.
-    st = load_streamlit()
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
-    render_global_styles(st)
+def format_ui_duration(seconds: object) -> str:
+    """Format elapsed or remaining seconds for the processing UI."""
+    try:
+        total_seconds = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError, OverflowError):
+        return "計測中"
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}時間{minutes:02d}分"
+    if minutes:
+        return f"{minutes}分{secs:02d}秒"
+    return f"{secs}秒"
+
+
+def estimate_ui_remaining_seconds(elapsed_seconds: object, completed: int, total: int) -> Optional[float]:
+    """Estimate remaining processing time from completed-row average."""
+    if total <= 0 or completed <= 0:
+        return None
+    if completed >= total:
+        return 0.0
+    try:
+        elapsed = max(0.0, float(elapsed_seconds))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return elapsed / completed * (total - completed)
+
+
+def summarize_ui_rows(frame: pd.DataFrame) -> dict[str, int]:
+    """Return mutually useful row counts for the workflow and safety gate."""
+    total = int(len(frame))
+    processed = 0
+    ready = 0
+    review = 0
+    excluded = 0
+    for _, row in frame.iterrows():
+        if not row_is_processed(row):
+            continue
+        processed += 1
+        eligibility = get_row_value(row, "Listing Eligibility").lower()
+        needs_review = get_row_value(row, "Needs Review").lower() == "yes"
+        if eligibility == "excluded":
+            excluded += 1
+        elif needs_review:
+            review += 1
+        else:
+            ready += 1
+    return {
+        "total": total,
+        "processed": processed,
+        "ready": ready,
+        "review": review,
+        "excluded": excluded,
+        "remaining": max(0, total - processed),
+    }
+
+
+def build_workflow_steps_html(active_step: int) -> str:
+    """Build the five-step workflow navigation used before and after upload."""
+    active = max(1, min(5, int(active_step)))
+    steps = [
+        (1, "CSV", "読み込む"),
+        (2, "設定", "確認する"),
+        (3, "処理", "自動補完"),
+        (4, "確認", "結果を見る"),
+        (5, "保存", "CSV出力"),
+    ]
+    items: list[str] = []
+    for number, title, subtitle in steps:
+        if number < active:
+            state = "is-complete"
+            marker = "✓"
+        elif number == active:
+            state = "is-active"
+            marker = str(number)
+        else:
+            state = "is-pending"
+            marker = str(number)
+        aria_current = ' aria-current="step"' if number == active else ""
+        items.append(
+            f'<div class="workflow-step {state}"{aria_current}>'
+            f'<span class="workflow-marker">{marker}</span>'
+            f'<span class="workflow-copy"><strong>{html_escape(title)}</strong>'
+            f'<small>{html_escape(subtitle)}</small></span></div>'
+        )
+    return '<nav class="workflow-steps" aria-label="CSV処理の進み方">' + "".join(items) + "</nav>"
+
+
+def render_app_header(st) -> None:
     st.markdown(
         """
-        <div class="app-header">
-          <div>
-            <div class="app-kicker">eBay listing CSV</div>
-            <h1>漫画セット補完ワークベンチ</h1>
+        <section class="app-hero">
+          <div class="hero-copy">
+            <div class="hero-eyebrow"><span></span>EBAY MANGA OPERATIONS</div>
+            <h1>漫画セットCSVを、<br>出品できる状態へ。</h1>
+            <p>画像の安全確認、冊数・重量・FICP送料、Specifics補完まで。<br>迷わず進められる順番で、出品前チェックをひとつにまとめました。</p>
+            <div class="hero-tags">
+              <span>同一商品画像を検証</span><span>要確認を自動抽出</span><span>eBay CSV対応</span>
+            </div>
           </div>
-          <div class="header-badge">Mercari details / Specifics / FICP</div>
+          <div class="hero-emblem" aria-hidden="true"><span>MANGA</span><strong>FICP</strong><small>CSV WORKSPACE</small></div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_heading(st, step: str, title: str, description: str = "") -> None:
+    description_html = f"<p>{html_escape(description)}</p>" if description else ""
+    st.markdown(
+        f'<div class="section-heading"><span>{html_escape(step)}</span>'
+        f'<div><h2>{html_escape(title)}</h2>{description_html}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_upload_empty_state(st) -> None:
+    st.markdown(
+        """
+        <div class="empty-state">
+          <div class="empty-icon" aria-hidden="true">CSV</div>
+          <div>
+            <h3>DeepBayのCSVを読み込んで開始</h3>
+            <p>列は自動判定されます。通常は、そのまま全件処理へ進めます。</p>
+            <div class="empty-checks"><span>✓ 元CSVは変更しません</span><span>✓ 画像を商品IDで検証</span><span>✓ 要確認は出力から保留</span></div>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def main() -> None:  # pragma: no cover - UI smoke-tested manually.
+    st = load_streamlit()
+    st.set_page_config(
+        page_title="漫画セット出品アシスタント",
+        page_icon="📚",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+    render_global_styles(st)
+    render_app_header(st)
+    workflow_slot = st.empty()
+    workflow_slot.markdown(build_workflow_steps_html(1), unsafe_allow_html=True)
     render_public_login_gate(st)
 
-    uploaded = st.file_uploader("1. CSVファイル", type=["csv"], label_visibility="collapsed")
+    render_section_heading(st, "STEP 1", "CSVを読み込む", "DeepBayから抽出した元CSVを選択してください。")
+    with st.container(border=True):
+        uploaded = st.file_uploader(
+            "DeepBay CSVを選択",
+            type=["csv"],
+            help="元CSVは変更されません。処理結果は新しいCSVとしてダウンロードします。",
+        )
     raw, uploaded_name, using_cached_upload = get_uploaded_or_cached_csv(st, uploaded, persist=not is_public_mode())
 
     if not raw:
-        st.markdown(
-            """
-            <div class="empty-state">
-              <h3>CSVをここに読み込んで開始</h3>
-              <p>読み込み後、列の対応、米国向け送料設定、商品ごとの確認を同じ画面で行えます。</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        render_upload_empty_state(st)
         return
 
     if using_cached_upload:
-        st.caption(f"前回読み込んだCSVを保持しています: {uploaded_name}")
+        st.caption(f"前回の作業を復元しました: {uploaded_name}")
 
     file_key = f"{PROCESSING_LOGIC_VERSION}:{uploaded_name}:{hashlib.sha256(raw).hexdigest()}"
     frame, encoding = read_csv_bytes(raw)
@@ -6063,6 +6230,17 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         active_frame = cached_processed_frame if cached_processed_frame is not None else frame
         st.session_state["comic_ficp_processed_df"] = active_frame
         st.session_state["comic_ficp_file_key"] = file_key
+
+    initial_ui_summary = summarize_ui_rows(active_frame)
+    initial_active_step = (
+        4
+        if initial_ui_summary["processed"]
+        and (initial_ui_summary["remaining"] or initial_ui_summary["review"] or initial_ui_summary["excluded"])
+        else 5
+        if initial_ui_summary["processed"] == initial_ui_summary["total"]
+        else 2
+    )
+    workflow_slot.markdown(build_workflow_steps_html(initial_active_step), unsafe_allow_html=True)
 
     row_options = list(range(len(active_frame)))
     if not row_options:
@@ -6080,13 +6258,14 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     selected_title_col = st.session_state.get("comic_ficp_title_col", guessed["title_col"])
 
     selected_index = st.selectbox(
-        "2. 確認・処理する商品",
+        "確認する商品",
         row_options,
         format_func=lambda idx: format_row_label(active_frame.iloc[idx], idx, selected_title_col),
         key=selected_index_key,
+        help="処理前の確認や、処理後に要確認となった商品を切り替えます。",
     )
 
-    control_col, workspace_col = st.columns([0.32, 0.68], gap="medium")
+    control_col, workspace_col = st.columns([0.36, 0.64], gap="large", vertical_alignment="top")
     with control_col:
         url_col = guessed["url_col"] if guessed["url_col"] in options else ""
         image_col = guessed["image_col"] if guessed["image_col"] in options else ""
@@ -6095,7 +6274,8 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         description_col = guessed["description_col"] if guessed["description_col"] in options else ""
         shipping_col = guessed["shipping_col"] if guessed["shipping_col"] in options else ""
         shipping_profile_col = guessed["shipping_profile_col"] if guessed.get("shipping_profile_col") in options else ""
-        st.markdown('<div class="section-title">3. 自動判定されたCSV列</div>', unsafe_allow_html=True)
+        render_section_heading(st, "STEP 2", "設定を確認", "通常は自動判定と標準設定のままで進めます。")
+        st.markdown('<div class="subsection-label">自動判定されたCSV列</div>', unsafe_allow_html=True)
         render_mapping_status(st, url_col, image_col, title_col, description_col, shipping_profile_col, shipping_col)
         with st.expander("CSV列の対応を手動で変更する"):
             st.caption("通常は自動判定のままでOKです。別形式のCSVや判定ミスがある場合だけ変更してください。")
@@ -6130,8 +6310,12 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             )
             render_mapping_status(st, url_col, image_col, title_col, description_col, shipping_profile_col, shipping_col)
 
-        st.markdown('<div class="section-title">4. 送料と取得</div>', unsafe_allow_html=True)
-        with st.container(border=True):
+        st.markdown('<div class="subsection-label">送料・取得・AI</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="compact-notice">標準設定のまま処理できます。Zone、為替、AIモデルなどを変える場合だけ詳細設定を開いてください。</div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander("送料・取得・AIの詳細設定", expanded=False):
             zone = st.selectbox(
                 "米国向けFICP Zone",
                 FICP_ZONES,
@@ -6459,7 +6643,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             ai_api_key=ai_api_key,
         )
 
-        st.markdown('<div class="section-title">5. 実行と保存</div>', unsafe_allow_html=True)
+        render_section_heading(st, "STEP 3", "自動処理", "まず1件だけ試すことも、CSV全体をまとめて処理することもできます。")
         with st.container(border=True):
             rollup_enabled = st.checkbox("送料を価格に転嫁して送料無料にする", value=True)
             free_shipping_profile_name = st.selectbox(
@@ -6485,9 +6669,27 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                 free_shipping_profile_name=free_shipping_profile_name,
                 markup_percent=float(transfer_markup_percent),
             )
-            process_selected = st.button("選択行を処理", type="primary", use_container_width=True)
-            process_all = st.button("全件を処理", type="secondary", use_container_width=True)
-            clear_results = st.button("処理前に戻す", use_container_width=True)
+            run_all_col, run_one_col = st.columns([0.62, 0.38], gap="small")
+            process_all = run_all_col.button(
+                f"全{len(active_frame):,}件をまとめて処理",
+                type="primary",
+                icon=":material/play_arrow:",
+                use_container_width=True,
+            )
+            process_selected = run_one_col.button(
+                "1件だけ試す",
+                type="secondary",
+                icon=":material/science:",
+                use_container_width=True,
+            )
+            with st.expander("処理結果をリセットする", expanded=False):
+                st.caption("処理済みの判定結果を消し、読み込んだ元CSVの状態へ戻します。eBay上の商品には影響しません。")
+                clear_results = st.button(
+                    "判定結果を消去して元CSVへ戻す",
+                    type="tertiary",
+                    icon=":material/restart_alt:",
+                    use_container_width=True,
+                )
             feedback_slot = st.empty()
             download_slot = st.empty()
 
@@ -6495,30 +6697,82 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         st.session_state["comic_ficp_processed_df"] = frame
         active_frame = frame
         save_processed_dataframe_cache(active_frame, file_key)
+        workflow_slot.markdown(build_workflow_steps_html(2), unsafe_allow_html=True)
+        with feedback_slot.container():
+            st.info("処理結果を消去し、元CSVの状態へ戻しました。")
 
     if process_selected or process_all:
         indices = [selected_index] if process_selected else list(active_frame.index)
+        total_hint = len(indices)
+        started_at = time.monotonic()
+        workflow_slot.markdown(build_workflow_steps_html(3), unsafe_allow_html=True)
         with feedback_slot.container():
-            progress_bar = st.progress(0)
+            progress_bar = st.progress(0.0, text=f"0/{total_hint}件（0.0%）")
+            progress_columns = st.columns(4)
+            progress_metrics = [column.empty() for column in progress_columns]
+            progress_metrics[0].metric("進捗", "0.0%")
+            progress_metrics[1].metric("完了", f"0/{total_hint}件")
+            progress_metrics[2].metric("経過時間", "0秒")
+            progress_metrics[3].metric("残り時間", "計測中")
             progress_text = st.empty()
+            progress_text.info("最初の商品を処理しています。1件完了後から残り時間を予測します。")
+            run_status = st.status(f"処理中: 0/{total_hint}件", expanded=False)
+            st.caption("残り時間は、完了済み商品の平均処理時間から計算する概算です。通信状況やAI補完によって変動します。")
 
-        def progress(current: int, total: int, label: str) -> None:
-            progress_bar.progress(current / total)
-            progress_text.write(f"{current}/{total}: {label[:90]}")
+            def progress(current: int, total: int, label: str) -> None:
+                elapsed = time.monotonic() - started_at
+                fraction = 0.0 if total <= 0 else max(0.0, min(1.0, current / total))
+                percent = fraction * 100
+                remaining = estimate_ui_remaining_seconds(elapsed, current, total)
+                remaining_label = format_ui_duration(remaining) if remaining is not None else "計測中"
+                eta_label = (
+                    time.strftime("%H:%M:%S", time.localtime(time.time() + remaining))
+                    if remaining is not None
+                    else "計測中"
+                )
+                progress_bar.progress(fraction, text=f"{current}/{total}件（{percent:.1f}%）")
+                progress_metrics[0].metric("進捗", f"{percent:.1f}%")
+                progress_metrics[1].metric("完了", f"{current}/{total}件")
+                progress_metrics[2].metric("経過時間", format_ui_duration(elapsed))
+                progress_metrics[3].metric("残り時間", remaining_label)
+                progress_text.info(f"現在: {label[:76]}　｜　完了予測: {eta_label}")
+                run_status.update(
+                    label=f"処理中: {current}/{total}件（残り約 {remaining_label}）",
+                    state="running",
+                )
 
-        with st.spinner("処理中です"):
             active_frame = process_dataframe(active_frame, config, row_indices=indices, progress_callback=progress)
             st.session_state["comic_ficp_processed_df"] = active_frame
             save_processed_dataframe_cache(active_frame, file_key)
-        with feedback_slot.container():
-            st.success("処理が完了しました。")
+            elapsed_total = time.monotonic() - started_at
+            progress_bar.progress(1.0, text=f"{total_hint}/{total_hint}件（100.0%）")
+            progress_metrics[0].metric("進捗", "100.0%")
+            progress_metrics[1].metric("完了", f"{total_hint}/{total_hint}件")
+            progress_metrics[2].metric("経過時間", format_ui_duration(elapsed_total))
+            progress_metrics[3].metric("残り時間", "0秒")
+            progress_text.success(f"処理が完了しました（{time.strftime('%H:%M:%S')}）。")
+            run_status.update(label=f"処理完了（{format_ui_duration(elapsed_total)}）", state="complete")
+            post_summary = summarize_ui_rows(active_frame)
+            st.success(
+                f"出力可能 {post_summary['ready']:,}件 / 要確認 {post_summary['review']:,}件 / "
+                f"出力除外 {post_summary['excluded']:,}件"
+            )
+        if process_all:
+            st.session_state[view_key] = "投入前チェック"
+        post_active_step = 4 if post_summary["remaining"] or post_summary["review"] or post_summary["excluded"] else 5
+        workflow_slot.markdown(build_workflow_steps_html(post_active_step), unsafe_allow_html=True)
 
     export_frame = build_export_dataframe(active_frame, rollup_options)
     excluded_count = len(active_frame) - len(export_frame)
+    ui_summary = summarize_ui_rows(active_frame)
+    all_rows_processed = bool(ui_summary["total"]) and ui_summary["remaining"] == 0
     output_name = f"ebay-comic-ficp-{time.strftime('%Y%m%d-%H%M%S')}.csv"
     with download_slot:
+        render_section_heading(st, "STEP 5", "CSVを保存", "全件処理が終わると、安全確認済みのCSVを保存できます。")
         if excluded_count:
-            st.warning(f"出品除外 {excluded_count} 件は、ダウンロードCSVから自動で削除されます。")
+            st.warning(f"要確認・出力除外の合計 {excluded_count}件は、ダウンロードCSVから自動で外れます。")
+        if not all_rows_processed:
+            st.info(f"あと {ui_summary['remaining']:,}件です。全件処理後にダウンロードできます。")
         if rollup_options.enabled:
             rollup_summary = summarize_free_shipping_rollup(export_frame)
             sum_col1, sum_col2, sum_col3 = st.columns(3)
@@ -6526,15 +6780,20 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             sum_col2.metric("スキップ件数", rollup_summary["skipped"])
             sum_col3.metric("平均転嫁送料", rollup_summary["average_transfer_usd"])
         st.download_button(
-            "CSVをダウンロード",
+            "eBay用CSVをダウンロード",
             data=dataframe_to_csv_bytes(export_frame),
             file_name=output_name,
             mime="text/csv",
+            type="primary" if all_rows_processed and not export_frame.empty else "secondary",
+            icon=":material/download:",
+            disabled=not all_rows_processed or export_frame.empty,
             use_container_width=True,
         )
+        if all_rows_processed:
+            st.caption(f"出力対象 {len(export_frame):,}件。元CSVとは別ファイルとして保存されます。")
 
     with workspace_col:
-        st.markdown('<div class="section-title">商品確認</div>', unsafe_allow_html=True)
+        render_section_heading(st, "STEP 4", "結果を確認", "要確認と除外候補を先に確認し、問題がなければCSVを保存します。")
         workspace_view = st.radio(
             "商品確認表示",
             ["選択商品", "投入前チェック", "処理結果一覧", "処理診断", "除外候補", "CSV全体"],
@@ -6563,30 +6822,267 @@ def render_global_styles(st) -> None:
         <style>
         :root {
             --app-text: #172033;
-            --app-muted: #667085;
+            --app-muted: #64748b;
             --app-panel: #ffffff;
-            --app-bg: #f7f8fb;
-            --app-border: #dbe3ef;
-            --app-control: #101828;
-            --app-accent: #ef4444;
-            --app-soft: #f1f5f9;
+            --app-bg: #f4f6fb;
+            --app-border: #dfe5f0;
+            --app-control: #334155;
+            --app-accent: #4f46e5;
+            --app-accent-dark: #3730a3;
+            --app-teal: #0f766e;
+            --app-danger: #b91c1c;
+            --app-warning: #b45309;
+            --app-soft: #eef2ff;
+            --app-shadow: 0 18px 48px rgba(30, 41, 59, 0.08);
         }
         .stApp {
-            background: var(--app-bg);
+            background:
+                radial-gradient(circle at 10% 0%, rgba(99, 102, 241, 0.08), transparent 34rem),
+                radial-gradient(circle at 95% 18%, rgba(20, 184, 166, 0.06), transparent 28rem),
+                var(--app-bg);
             color: var(--app-text);
         }
-        .stApp, .stApp p, .stApp span, .stApp label, .stApp div {
+        .stApp, .stApp p, .stApp label {
             color: var(--app-text);
         }
         .block-container {
-            max-width: 1540px;
-            padding-top: 1.1rem;
-            padding-bottom: 2rem;
+            max-width: 1500px;
+            padding-top: 1.25rem;
+            padding-bottom: 3rem;
         }
         h1, h2, h3, h4, h5, h6 {
-            color: #0f1f3d !important;
-            letter-spacing: 0;
+            color: #111827 !important;
+            letter-spacing: -0.02em;
         }
+        .app-hero {
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 32px;
+            min-height: 286px;
+            padding: 40px 46px;
+            margin: 4px 0 18px;
+            border: 1px solid rgba(255, 255, 255, 0.09);
+            border-radius: 28px;
+            background:
+                radial-gradient(circle at 82% 22%, rgba(129, 140, 248, 0.32), transparent 24rem),
+                linear-gradient(135deg, #0b1220 0%, #171a3d 54%, #312e81 100%);
+            box-shadow: 0 28px 70px rgba(15, 23, 42, 0.22);
+        }
+        .app-hero::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            opacity: 0.12;
+            background-image:
+                linear-gradient(rgba(255,255,255,.28) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,.28) 1px, transparent 1px);
+            background-size: 34px 34px;
+            mask-image: linear-gradient(90deg, transparent 40%, #000 100%);
+        }
+        .hero-copy {
+            position: relative;
+            z-index: 1;
+            max-width: 820px;
+        }
+        .hero-eyebrow {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            margin-bottom: 13px;
+            color: #a5b4fc !important;
+            font-size: 12px;
+            font-weight: 850;
+            letter-spacing: 0.14em;
+        }
+        .hero-eyebrow span {
+            width: 9px;
+            height: 9px;
+            border-radius: 999px;
+            background: #2dd4bf;
+            box-shadow: 0 0 0 5px rgba(45, 212, 191, 0.14);
+        }
+        .app-hero h1 {
+            margin: 0;
+            color: #ffffff !important;
+            font-size: clamp(34px, 4.1vw, 58px);
+            font-weight: 880;
+            line-height: 1.12;
+            letter-spacing: -0.045em;
+        }
+        .app-hero p {
+            margin: 18px 0 0;
+            color: #cbd5e1 !important;
+            font-size: 15px;
+            font-weight: 560;
+            line-height: 1.75;
+        }
+        .hero-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 22px;
+        }
+        .hero-tags span {
+            border: 1px solid rgba(199, 210, 254, 0.22);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #e0e7ff !important;
+            padding: 7px 11px;
+            font-size: 12px;
+            font-weight: 760;
+            backdrop-filter: blur(8px);
+        }
+        .hero-emblem {
+            position: relative;
+            z-index: 1;
+            flex: 0 0 216px;
+            width: 216px;
+            height: 216px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 50%;
+            background: rgba(15, 23, 42, 0.34);
+            box-shadow: inset 0 0 0 12px rgba(255,255,255,.025), 0 20px 50px rgba(0,0,0,.18);
+            color: #ffffff !important;
+        }
+        .hero-emblem::before,
+        .hero-emblem::after {
+            content: "";
+            position: absolute;
+            border: 1px solid rgba(165,180,252,.32);
+            border-radius: 50%;
+        }
+        .hero-emblem::before { inset: 20px; }
+        .hero-emblem::after { inset: 34px; border-style: dashed; }
+        .hero-emblem span,
+        .hero-emblem strong,
+        .hero-emblem small {
+            position: relative;
+            z-index: 1;
+            color: #ffffff !important;
+        }
+        .hero-emblem span { font-size: 11px; font-weight: 850; letter-spacing: .22em; color: #a5b4fc !important; }
+        .hero-emblem strong { margin: 4px 0; font-size: 35px; line-height: 1; letter-spacing: -.04em; }
+        .hero-emblem small { font-size: 9px; font-weight: 800; letter-spacing: .16em; color: #99f6e4 !important; }
+        .workflow-steps {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 10px;
+            margin: 16px 0 26px;
+        }
+        .workflow-step {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-height: 68px;
+            padding: 11px 13px;
+            border: 1px solid var(--app-border);
+            border-radius: 15px;
+            background: rgba(255,255,255,.78);
+            box-shadow: 0 5px 16px rgba(30,41,59,.035);
+        }
+        .workflow-marker {
+            flex: 0 0 32px;
+            width: 32px;
+            height: 32px;
+            display: grid;
+            place-items: center;
+            border: 1px solid #cbd5e1;
+            border-radius: 50%;
+            background: #ffffff;
+            color: #64748b !important;
+            font-size: 12px;
+            font-weight: 850;
+        }
+        .workflow-copy { display: flex; flex-direction: column; min-width: 0; }
+        .workflow-copy strong { color: #334155 !important; font-size: 13px; line-height: 1.25; }
+        .workflow-copy small { margin-top: 2px; color: #94a3b8 !important; font-size: 10px; font-weight: 650; white-space: nowrap; }
+        .workflow-step.is-active {
+            border-color: #818cf8;
+            background: linear-gradient(135deg, #eef2ff, #ffffff);
+            box-shadow: 0 10px 24px rgba(79,70,229,.10);
+        }
+        .workflow-step.is-active .workflow-marker { border-color: var(--app-accent); background: var(--app-accent); color: #ffffff !important; }
+        .workflow-step.is-active .workflow-copy strong { color: var(--app-accent-dark) !important; }
+        .workflow-step.is-complete { border-color: #a7f3d0; background: #f0fdfa; }
+        .workflow-step.is-complete .workflow-marker { border-color: var(--app-teal); background: var(--app-teal); color: #ffffff !important; }
+        .login-heading {
+            max-width: 760px;
+            margin: 34px auto 22px;
+            text-align: center;
+        }
+        .login-heading span { color: var(--app-accent) !important; font-size: 11px; font-weight: 850; letter-spacing: .16em; }
+        .login-heading h2 { margin: 6px 0 4px; font-size: 31px; }
+        .login-heading p { margin: 0; color: var(--app-muted) !important; }
+        .login-feature-card {
+            min-height: 100%;
+            padding: 28px;
+            border: 1px solid #c7d2fe;
+            border-radius: 20px;
+            background: linear-gradient(145deg, #eef2ff 0%, #ffffff 70%);
+            box-shadow: 0 16px 34px rgba(79,70,229,.07);
+        }
+        .login-feature-kicker { color: var(--app-accent) !important; font-size: 11px; font-weight: 850; letter-spacing: .11em; }
+        .login-feature-card h3 { margin: 8px 0 20px; font-size: 25px; line-height: 1.35; }
+        .login-feature-card ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+        .login-feature-card li { display: flex; align-items: flex-start; gap: 12px; }
+        .login-feature-card li > span { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; border-radius: 10px; background: #ffffff; color: var(--app-accent) !important; font-size: 10px; font-weight: 850; box-shadow: 0 5px 14px rgba(79,70,229,.09); }
+        .login-feature-card li div { display: flex; flex-direction: column; }
+        .login-feature-card li strong { color: #1e293b !important; font-size: 13px; }
+        .login-feature-card li small { margin-top: 2px; color: #64748b !important; font-size: 11px; line-height: 1.45; }
+        .privacy-note { margin-top: 22px; padding: 11px 13px; border-radius: 12px; background: rgba(15,118,110,.08); color: #115e59 !important; font-size: 11px; font-weight: 700; }
+        .account-card { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 12px; padding: 12px 14px; border: 1px solid #c7d2fe; border-radius: 13px; background: #eef2ff; }
+        .account-card span { color: #64748b !important; font-size: 10px; font-weight: 750; }
+        .account-card strong { color: #312e81 !important; overflow-wrap: anywhere; }
+        .section-heading {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            margin: 22px 0 10px;
+        }
+        .section-heading > span {
+            flex: 0 0 auto;
+            margin-top: 3px;
+            padding: 5px 8px;
+            border-radius: 8px;
+            background: #e0e7ff;
+            color: #4338ca !important;
+            font-size: 10px;
+            font-weight: 880;
+            letter-spacing: .06em;
+        }
+        .section-heading h2 { margin: 0; font-size: 19px; line-height: 1.3; }
+        .section-heading p { margin: 3px 0 0; color: var(--app-muted) !important; font-size: 12px; line-height: 1.45; }
+        .subsection-label {
+            margin: 15px 0 8px;
+            color: #334155 !important;
+            font-size: 13px;
+            font-weight: 850;
+        }
+        .file-summary-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 13px 16px;
+            margin: 14px 0 10px;
+            border: 1px solid var(--app-border);
+            border-radius: 15px;
+            background: rgba(255,255,255,.88);
+            box-shadow: 0 8px 22px rgba(30,41,59,.045);
+        }
+        .file-summary-name { display: flex; align-items: center; gap: 11px; min-width: 0; }
+        .file-summary-name > div { min-width: 0; display: flex; flex-direction: column; }
+        .file-summary-name small { color: #64748b !important; font-size: 10px; font-weight: 700; }
+        .file-summary-name strong { color: #1e293b !important; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .file-ready-dot { flex: 0 0 11px; width: 11px; height: 11px; border-radius: 50%; background: #14b8a6; box-shadow: 0 0 0 5px rgba(20,184,166,.12); }
+        .encoding-pill { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; background: #f1f5f9; color: #475569 !important; font-size: 10px; font-weight: 750; }
         .app-header {
             display: flex;
             justify-content: space-between;
@@ -6618,11 +7114,15 @@ def render_global_styles(st) -> None:
             white-space: nowrap;
         }
         .empty-state {
-            background: #ffffff;
-            border: 1px dashed #b6c2d4;
-            border-radius: 8px;
-            padding: 28px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            background: rgba(255,255,255,.82);
+            border: 1px dashed #a5b4fc;
+            border-radius: 20px;
+            padding: 28px 30px;
             margin-top: 14px;
+            box-shadow: 0 12px 30px rgba(79,70,229,.045);
         }
         .empty-state h3 {
             margin: 0 0 8px;
@@ -6632,6 +7132,9 @@ def render_global_styles(st) -> None:
             margin: 0;
             color: var(--app-muted) !important;
         }
+        .empty-icon { flex: 0 0 62px; width: 62px; height: 62px; display: grid; place-items: center; border-radius: 18px; background: linear-gradient(145deg, #4f46e5, #312e81); color: #ffffff !important; font-size: 14px; font-weight: 900; letter-spacing: .08em; box-shadow: 0 12px 24px rgba(79,70,229,.22); }
+        .empty-checks { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+        .empty-checks span { padding: 5px 8px; border-radius: 999px; background: #ecfdf5; color: #047857 !important; font-size: 10px; font-weight: 750; }
         .section-title {
             font-size: 15px;
             font-weight: 800;
@@ -6640,16 +7143,28 @@ def render_global_styles(st) -> None:
         }
         .status-strip {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 10px;
             margin: 10px 0 16px;
         }
         .status-item {
-            background: #ffffff;
+            position: relative;
+            overflow: hidden;
+            background: rgba(255,255,255,.92);
             border: 1px solid var(--app-border);
-            border-radius: 8px;
-            padding: 11px 13px;
-            min-height: 74px;
+            border-radius: 15px;
+            padding: 13px 15px;
+            min-height: 82px;
+            box-shadow: 0 8px 22px rgba(30,41,59,.04);
+        }
+        .status-item::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: #cbd5e1;
         }
         .status-label {
             color: var(--app-muted) !important;
@@ -6658,11 +7173,18 @@ def render_global_styles(st) -> None:
             margin-bottom: 5px;
         }
         .status-value {
-            font-size: 18px;
-            font-weight: 800;
+            font-size: 24px;
+            font-weight: 860;
             color: var(--app-text) !important;
             overflow-wrap: anywhere;
+            line-height: 1.15;
         }
+        .status-value small { margin-left: 3px; color: #94a3b8 !important; font-size: 11px; font-weight: 750; }
+        .status-item.status-ready::before { background: #14b8a6; }
+        .status-item.status-review::before { background: #f59e0b; }
+        .status-item.status-excluded::before { background: #ef4444; }
+        .status-progress { height: 4px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
+        .status-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4f46e5, #14b8a6); }
         .mapping-ok, .mapping-miss {
             display: inline-block;
             border-radius: 999px;
@@ -6686,6 +7208,7 @@ def render_global_styles(st) -> None:
             background: #ffffff !important;
             color: var(--app-text) !important;
             border-color: #cbd5e1 !important;
+            border-radius: 10px !important;
         }
         [data-baseweb="select"] span,
         [data-baseweb="select"] svg,
@@ -6695,32 +7218,82 @@ def render_global_styles(st) -> None:
             fill: var(--app-text) !important;
         }
         [data-testid="stFileUploaderDropzone"] {
-            background: #ffffff !important;
-            border: 1px solid var(--app-border) !important;
+            min-height: 92px;
+            background: linear-gradient(135deg, #f8faff, #ffffff) !important;
+            border: 1px dashed #a5b4fc !important;
+            border-radius: 15px !important;
         }
         [data-testid="stFileUploaderDropzone"] * {
             color: var(--app-text) !important;
         }
         button[kind="primary"] {
-            background: var(--app-accent) !important;
-            border-color: var(--app-accent) !important;
+            background: linear-gradient(135deg, #4f46e5, #3730a3) !important;
+            border-color: #4338ca !important;
             color: #ffffff !important;
+            box-shadow: 0 9px 20px rgba(79,70,229,.20) !important;
         }
         button[kind="secondary"] {
-            background: var(--app-control) !important;
-            border-color: var(--app-control) !important;
+            background: #ffffff !important;
+            border-color: #c7d2fe !important;
+            color: #3730a3 !important;
+            box-shadow: 0 4px 12px rgba(30,41,59,.04) !important;
+        }
+        button[kind="tertiary"] {
+            color: #64748b !important;
+        }
+        button[kind="primary"] * {
             color: #ffffff !important;
         }
-        button[kind="primary"] *,
-        button[kind="secondary"] * {
-            color: #ffffff !important;
+        button[kind="secondary"] * { color: #3730a3 !important; }
+        button[kind="tertiary"] * { color: #64748b !important; }
+        button[kind="primary"], button[kind="secondary"], button[kind="tertiary"] {
+            min-height: 42px;
+            border-radius: 11px !important;
+            font-weight: 760 !important;
+            transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+        }
+        button[kind="primary"]:hover, button[kind="secondary"]:hover { transform: translateY(-1px); }
+        button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, [role="radio"]:focus-visible {
+            outline: 3px solid rgba(79,70,229,.30) !important;
+            outline-offset: 2px !important;
+        }
+        button:disabled { box-shadow: none !important; transform: none !important; opacity: .58 !important; }
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 17px !important;
+            border-color: var(--app-border) !important;
+            background: rgba(255,255,255,.78);
+            box-shadow: 0 8px 24px rgba(30,41,59,.035);
+        }
+        [data-testid="stExpander"] {
+            border-color: var(--app-border) !important;
+            border-radius: 13px !important;
+            background: rgba(255,255,255,.72);
+        }
+        [data-baseweb="tab-list"] { gap: 6px; border-bottom-color: var(--app-border) !important; }
+        [data-baseweb="tab"] { border-radius: 9px 9px 0 0; font-weight: 760; }
+        [data-testid="stRadio"] > div {
+            gap: 5px;
+            padding: 5px;
+            border: 1px solid var(--app-border);
+            border-radius: 13px;
+            background: rgba(255,255,255,.82);
+        }
+        [data-testid="stRadio"] label {
+            margin: 0 !important;
+            padding: 7px 9px !important;
+            border-radius: 9px;
+            white-space: nowrap;
+        }
+        [data-testid="stRadio"] label:has(input:checked) {
+            background: #eef2ff;
+            color: #3730a3 !important;
         }
         div[data-testid="stMetric"] {
             background: #ffffff;
             border: 1px solid var(--app-border);
-            border-radius: 8px;
+            border-radius: 13px;
             padding: 12px 14px;
-            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+            box-shadow: 0 7px 18px rgba(16, 24, 40, 0.045);
         }
         div[data-testid="stMetric"] *,
         [data-testid="stMetricLabel"],
@@ -6733,13 +7306,48 @@ def render_global_styles(st) -> None:
             gap: 12px;
             margin: 10px 0 18px;
         }
+        .decision-strip {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 9px;
+            margin: 10px 0 14px;
+        }
+        .decision-card {
+            position: relative;
+            overflow: hidden;
+            min-height: 92px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 13px 14px 13px 17px;
+            border: 1px solid var(--app-border);
+            border-radius: 14px;
+            background: #ffffff;
+        }
+        .decision-card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: #94a3b8; }
+        .decision-card > span { color: #64748b !important; font-size: 10px; font-weight: 800; letter-spacing: .05em; }
+        .decision-card > strong { margin-top: 3px; color: #1e293b !important; font-size: 16px; line-height: 1.25; }
+        .decision-card > small { margin-top: 4px; color: #64748b !important; font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+        .decision-success { border-color: #a7f3d0; background: #f0fdfa; }
+        .decision-success::before { background: #0f766e; }
+        .decision-success > strong { color: #115e59 !important; }
+        .decision-warning { border-color: #fde68a; background: #fffbeb; }
+        .decision-warning::before { background: #f59e0b; }
+        .decision-warning > strong { color: #92400e !important; }
+        .decision-danger { border-color: #fecaca; background: #fff1f2; }
+        .decision-danger::before { background: #dc2626; }
+        .decision-danger > strong { color: #991b1b !important; }
+        .decision-pending { background: #f8fafc; }
+        .decision-next { border-color: #c7d2fe; background: #eef2ff; }
+        .decision-next::before { background: #4f46e5; }
+        .decision-next > strong { color: #3730a3 !important; }
         .preview-metric-card {
             background: #ffffff;
             border: 1px solid var(--app-border);
-            border-radius: 8px;
+            border-radius: 14px;
             padding: 13px 14px;
             min-height: 104px;
-            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+            box-shadow: 0 7px 18px rgba(16, 24, 40, 0.04);
         }
         .preview-metric-label {
             color: var(--app-muted) !important;
@@ -6768,7 +7376,7 @@ def render_global_styles(st) -> None:
         }
         [data-testid="stDataFrame"] {
             border: 1px solid var(--app-border);
-            border-radius: 8px;
+            border-radius: 14px;
             overflow: hidden;
             background: #ffffff;
         }
@@ -6779,7 +7387,7 @@ def render_global_styles(st) -> None:
             border: 1px solid var(--app-border);
             background: #ffffff;
             color: var(--app-text);
-            border-radius: 8px;
+            border-radius: 13px;
             padding: 13px 15px;
             margin: 8px 0 12px;
             line-height: 1.65;
@@ -6920,8 +7528,8 @@ def render_global_styles(st) -> None:
             background: #f1f5f9;
             color: #475467 !important;
         }
-        .image-shell img {
-            border-radius: 8px;
+        [data-testid="stImage"] img {
+            border-radius: 13px;
             border: 1px solid var(--app-border);
             max-height: 520px;
             object-fit: contain;
@@ -6978,7 +7586,7 @@ def render_global_styles(st) -> None:
         }
         .clickable-list {
             border: 1px solid var(--app-border);
-            border-radius: 8px;
+            border-radius: 15px;
             overflow: auto;
             background: #ffffff;
             max-height: 780px;
@@ -7025,8 +7633,8 @@ def render_global_styles(st) -> None:
             text-decoration: none !important;
         }
         .clickable-image-link:hover {
-            border-color: #ef4444;
-            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16);
+            border-color: #4f46e5;
+            box-shadow: 0 8px 18px rgba(79, 70, 229, 0.18);
         }
         .clickable-image-link img {
             width: 100%;
@@ -7094,20 +7702,56 @@ def render_global_styles(st) -> None:
             font-weight: 700;
             margin: 0 0 8px;
         }
+        @media (max-width: 1100px) {
+            .hero-emblem { flex-basis: 172px; width: 172px; height: 172px; }
+            .status-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .decision-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .decision-next { grid-column: 1 / -1; }
+        }
         @media (max-width: 900px) {
             .app-header {
                 align-items: flex-start;
                 flex-direction: column;
             }
-            .status-strip,
+            .app-hero { padding: 32px; min-height: 250px; }
+            .hero-emblem { display: none; }
+            .workflow-step { justify-content: center; padding: 10px 7px; }
+            .workflow-copy small { display: none; }
             .preview-metric-grid {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
+            [data-testid="stRadio"] > div { overflow-x: auto; flex-wrap: nowrap !important; justify-content: flex-start; }
         }
-        @media (max-width: 560px) {
+        @media (max-width: 700px) {
+            .block-container { padding-left: 1rem; padding-right: 1rem; }
+            .app-hero { min-height: 0; padding: 28px 24px; border-radius: 21px; }
+            .app-hero h1 { font-size: clamp(31px, 10vw, 42px); }
+            .app-hero p br { display: none; }
+            .hero-tags span { font-size: 10px; }
+            .workflow-steps { gap: 5px; margin: 12px 0 20px; }
+            .workflow-step { min-height: 58px; flex-direction: column; gap: 4px; border-radius: 12px; }
+            .workflow-marker { flex-basis: 27px; width: 27px; height: 27px; }
+            .workflow-copy strong { font-size: 10px; }
+            .status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .decision-strip,
             .preview-metric-grid {
                 grid-template-columns: 1fr;
             }
+            .decision-next { grid-column: auto; }
+            .empty-state { align-items: flex-start; flex-direction: column; padding: 23px; }
+            .file-summary-bar { align-items: flex-start; }
+            .encoding-pill { display: none; }
+            .login-heading { margin-top: 22px; }
+            .login-feature-card { padding: 22px; }
+            .section-heading { margin-top: 18px; }
+        }
+        @media (max-width: 430px) {
+            .app-hero { padding: 25px 20px; }
+            .hero-tags { gap: 5px; }
+            .hero-tags span:last-child { display: none; }
+            .workflow-marker { flex-basis: 25px; width: 25px; height: 25px; }
+            .status-value { font-size: 21px; }
+            .empty-checks { flex-direction: column; align-items: flex-start; }
         }
         </style>
         """,
@@ -7116,31 +7760,36 @@ def render_global_styles(st) -> None:
 
 
 def render_file_summary(st, file_name: str, row_count: int, encoding: str, frame: pd.DataFrame) -> None:
-    processed_count = sum(1 for _, row in frame.iterrows() if get_row_value(row, "Scrape Status") or get_row_value(row, "Detected Book Count"))
-    shipping_count = sum(1 for _, row in frame.iterrows() if get_row_value(row, "FICP Shipping USD"))
-    excluded_count = sum(1 for _, row in frame.iterrows() if get_row_value(row, "Listing Eligibility").lower() == "excluded")
+    summary = summarize_ui_rows(frame)
+    progress_percent = (summary["processed"] / summary["total"] * 100) if summary["total"] else 0.0
+    safe_file_name = html_escape(file_name)
     st.markdown(
         f"""
+        <div class="file-summary-bar">
+          <div class="file-summary-name"><span class="file-ready-dot"></span><div><small>読み込み済み</small><strong title="{safe_file_name}">{safe_file_name}</strong></div></div>
+          <span class="encoding-pill">{html_escape(encoding)}</span>
+        </div>
         <div class="status-strip">
           <div class="status-item">
-            <div class="status-label">CSV</div>
-            <div class="status-value">{html_escape(file_name)}</div>
-          </div>
-          <div class="status-item">
-            <div class="status-label">行数</div>
-            <div class="status-value">{row_count:,}</div>
+            <div class="status-label">商品数</div>
+            <div class="status-value">{row_count:,}<small>件</small></div>
           </div>
           <div class="status-item">
             <div class="status-label">処理済み</div>
-            <div class="status-value">{processed_count:,}</div>
+            <div class="status-value">{summary['processed']:,}<small> / {summary['total']:,}</small></div>
+            <div class="status-progress"><span style="width:{progress_percent:.1f}%"></span></div>
           </div>
-          <div class="status-item">
-            <div class="status-label">送料入力済み</div>
-            <div class="status-value">{shipping_count:,} <span style="font-size:12px; color:#667085;">/ {html_escape(encoding)}</span></div>
+          <div class="status-item status-ready">
+            <div class="status-label">出力可能</div>
+            <div class="status-value">{summary['ready']:,}<small>件</small></div>
           </div>
-          <div class="status-item">
-            <div class="status-label">出品除外</div>
-            <div class="status-value">{excluded_count:,}</div>
+          <div class="status-item status-review">
+            <div class="status-label">要確認</div>
+            <div class="status-value">{summary['review']:,}<small>件</small></div>
+          </div>
+          <div class="status-item status-excluded">
+            <div class="status-label">出力除外</div>
+            <div class="status-value">{summary['excluded']:,}<small>件</small></div>
           </div>
         </div>
         """,
@@ -8001,6 +8650,64 @@ def render_additional_image_gallery(st, image_urls: list[str]) -> None:
     )
 
 
+def build_selected_decision_html(row: pd.Series, processed: bool) -> str:
+    eligibility = get_row_value(row, "Listing Eligibility").lower()
+    needs_review = get_row_value(row, "Needs Review").lower() == "yes"
+    review_reason = get_row_value(row, "Needs Review Reason")
+    image_status = get_row_value(row, "Image URL Validation Status")
+    rejected_images = get_row_value(row, "Rejected Source Image URL Count") or "0"
+
+    if not processed:
+        decision_tone = "pending"
+        decision_label = "未処理"
+        decision_detail = "自動処理を実行してください"
+        next_action = "まず1件試すか、全件をまとめて処理"
+    elif eligibility == "excluded":
+        decision_tone = "danger"
+        decision_label = "出力除外"
+        decision_detail = get_row_value(row, "Exclusion Reason") or "出力対象外です"
+        next_action = "除外理由を確認"
+    elif needs_review:
+        decision_tone = "warning"
+        decision_label = "要確認"
+        decision_detail = review_reason or "判断根拠を確認してください"
+        next_action = "要確認の理由を確認"
+    else:
+        decision_tone = "success"
+        decision_label = "出力可能"
+        decision_detail = "安全チェックを通過しています"
+        next_action = "投入前チェックへ進む"
+
+    image_status_lower = image_status.lower()
+    if not processed:
+        image_tone = "pending"
+        image_label = "確認待ち"
+        image_detail = "処理後に同一商品IDを検証"
+    elif image_status_lower.startswith("blocked"):
+        image_tone = "danger"
+        image_label = "画像なし"
+        image_detail = f"候補 {rejected_images}件を除外"
+    elif image_status:
+        image_tone = "success"
+        image_label = "画像検証済み"
+        image_detail = f"商品外画像 {rejected_images}件を除外"
+    else:
+        image_tone = "warning"
+        image_label = "要確認"
+        image_detail = "画像検証状態を確認してください"
+
+    return (
+        '<div class="decision-strip">'
+        f'<div class="decision-card decision-{decision_tone}"><span>出力判定</span>'
+        f'<strong>{html_escape(decision_label)}</strong><small>{html_escape(decision_detail)}</small></div>'
+        f'<div class="decision-card decision-{image_tone}"><span>画像安全性</span>'
+        f'<strong>{html_escape(image_label)}</strong><small>{html_escape(image_detail)}</small></div>'
+        '<div class="decision-card decision-next"><span>次の操作</span>'
+        f'<strong>{html_escape(next_action)}</strong><small>画面上部のステップに沿って進めます</small></div>'
+        "</div>"
+    )
+
+
 def render_selected_preview(
     st,
     row: pd.Series,
@@ -8073,9 +8780,8 @@ def render_selected_preview(
     if image_url:
         image_col_obj, detail_col_obj = st.columns([0.34, 0.66], gap="medium")
         with image_col_obj:
-            st.markdown('<div class="image-shell">', unsafe_allow_html=True)
-            st.image(image_url, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+            with st.container(border=True):
+                st.image(image_url, use_container_width=True)
             render_additional_image_gallery(st, additional_image_urls)
         detail_container = detail_col_obj
     else:
@@ -8087,6 +8793,7 @@ def render_selected_preview(
 
     with detail_container:
         st.subheader(title)
+        st.markdown(build_selected_decision_html(row, processed), unsafe_allow_html=True)
         if eligibility.lower() == "excluded":
             st.error(
                 "出品除外: 欠巻・欠品・欠損の可能性があるため、この商品はダウンロードCSVから自動で削除されます。"
@@ -8101,33 +8808,34 @@ def render_selected_preview(
                 shipping_usd=shipping_usd,
             ),
         )
-        st.markdown(
-            f"""
-            <div class="result-note">
-            <strong>冊数の根拠:</strong> {html_escape(get_row_value(row, "Book Count Evidence") or "-")}<br>
-            <strong>冊数判定:</strong> {html_escape(book_count_status or "-")}<br>
-            <strong>参照冊数判定:</strong> {html_escape((reference_book_count + "冊") if reference_book_count else "-")} / {html_escape(reference_count_source or "-")} / 信頼度 {html_escape(reference_count_confidence or "-")} / {html_escape(reference_count_evidence or reference_count_status or "-")}<br>
-            <strong>1冊重量:</strong> {html_escape((estimated_book_weight_g + "g") if estimated_book_weight_g else "-")} {html_escape("(" + book_weight_evidence + ")" if book_weight_evidence else "")}<br>
-            <strong>梱包材:</strong> {html_escape(format_weight_display(estimated_packaging_weight_kg))} {html_escape("(" + packaging_materials + ")" if packaging_materials else "")}<br>
-            <strong>梱包重量根拠:</strong> {html_escape(packaging_weight_evidence or "-")}<br>
-            <strong>重量根拠:</strong> 実重量 {html_escape(format_weight_display(actual_weight_kg))} / 容積重量 {html_escape(format_weight_display(dimensional_weight_kg))} / 採用 {html_escape("容積重量" if billable_weight_source == "dimensional" else "実重量" if billable_weight_source == "actual" else "-")}<br>
-            <strong>箱サイズ:</strong> {html_escape(package_length_cm or "-")} x {html_escape(package_width_cm or "-")} x {html_escape(package_height_cm or "-")} cm ({html_escape(package_dimension_source or "-")})<br>
-            <strong>米国Zone:</strong> {html_escape(us_zone or "-")}<br>
-            <strong>送料表:</strong> FedEx International Connect Plus Export (JPY)<br>
-            <strong>FICP基本送料:</strong> {html_escape(format_jpy_display(base_shipping_jpy) or "-")} {html_escape("$" + base_shipping_usd if base_shipping_usd else "")}<br>
-            <strong>燃油サーチャージ:</strong> {html_escape((fuel_surcharge_percent + "%") if fuel_surcharge_percent else "-")} / {html_escape(format_jpy_display(fuel_surcharge_jpy) or "-")} {html_escape("$" + fuel_surcharge_usd if fuel_surcharge_usd else "")}<br>
-            <strong>送料合計:</strong> {html_escape(format_jpy_display(shipping_jpy) or "-")} {html_escape("$" + shipping_usd if shipping_usd else "")}<br>
-            <strong>出品判定:</strong> {html_escape(eligibility or "-")}<br>
-            <strong>除外理由:</strong> {html_escape(exclusion_reason or "-")}<br>
-            <strong>除外根拠:</strong> {html_escape(exclusion_evidence or "-")}<br>
-            <strong>取得状態:</strong> {html_escape(status or "-")}<br>
-            <strong>AI補完:</strong> {html_escape(ai_status or "OFF")} {html_escape("(" + ai_provider + " / " + ai_model + ")" if ai_provider or ai_model else "")}<br>
-            <strong>参照元:</strong> {f'<a href="{html_escape(source_url)}" target="_blank">{html_escape(source_url)}</a>' if source_url else "-"}<br>
-            <strong>参照元判定:</strong> {html_escape(source_confidence or "-")} / {html_escape(source_evidence or "-")}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with st.expander("送料・判定の詳しい根拠", expanded=False):
+            st.markdown(
+                f"""
+                <div class="result-note">
+                <strong>冊数の根拠:</strong> {html_escape(get_row_value(row, "Book Count Evidence") or "-")}<br>
+                <strong>冊数判定:</strong> {html_escape(book_count_status or "-")}<br>
+                <strong>参照冊数判定:</strong> {html_escape((reference_book_count + "冊") if reference_book_count else "-")} / {html_escape(reference_count_source or "-")} / 信頼度 {html_escape(reference_count_confidence or "-")} / {html_escape(reference_count_evidence or reference_count_status or "-")}<br>
+                <strong>1冊重量:</strong> {html_escape((estimated_book_weight_g + "g") if estimated_book_weight_g else "-")} {html_escape("(" + book_weight_evidence + ")" if book_weight_evidence else "")}<br>
+                <strong>梱包材:</strong> {html_escape(format_weight_display(estimated_packaging_weight_kg))} {html_escape("(" + packaging_materials + ")" if packaging_materials else "")}<br>
+                <strong>梱包重量根拠:</strong> {html_escape(packaging_weight_evidence or "-")}<br>
+                <strong>重量根拠:</strong> 実重量 {html_escape(format_weight_display(actual_weight_kg))} / 容積重量 {html_escape(format_weight_display(dimensional_weight_kg))} / 採用 {html_escape("容積重量" if billable_weight_source == "dimensional" else "実重量" if billable_weight_source == "actual" else "-")}<br>
+                <strong>箱サイズ:</strong> {html_escape(package_length_cm or "-")} x {html_escape(package_width_cm or "-")} x {html_escape(package_height_cm or "-")} cm ({html_escape(package_dimension_source or "-")})<br>
+                <strong>米国Zone:</strong> {html_escape(us_zone or "-")}<br>
+                <strong>送料表:</strong> FedEx International Connect Plus Export (JPY)<br>
+                <strong>FICP基本送料:</strong> {html_escape(format_jpy_display(base_shipping_jpy) or "-")} {html_escape("$" + base_shipping_usd if base_shipping_usd else "")}<br>
+                <strong>燃油サーチャージ:</strong> {html_escape((fuel_surcharge_percent + "%") if fuel_surcharge_percent else "-")} / {html_escape(format_jpy_display(fuel_surcharge_jpy) or "-")} {html_escape("$" + fuel_surcharge_usd if fuel_surcharge_usd else "")}<br>
+                <strong>送料合計:</strong> {html_escape(format_jpy_display(shipping_jpy) or "-")} {html_escape("$" + shipping_usd if shipping_usd else "")}<br>
+                <strong>出品判定:</strong> {html_escape(eligibility or "-")}<br>
+                <strong>除外理由:</strong> {html_escape(exclusion_reason or "-")}<br>
+                <strong>除外根拠:</strong> {html_escape(exclusion_evidence or "-")}<br>
+                <strong>取得状態:</strong> {html_escape(status or "-")}<br>
+                <strong>AI補完:</strong> {html_escape(ai_status or "OFF")} {html_escape("(" + ai_provider + " / " + ai_model + ")" if ai_provider or ai_model else "")}<br>
+                <strong>参照元:</strong> {f'<a href="{html_escape(source_url)}" target="_blank">{html_escape(source_url)}</a>' if source_url else "-"}<br>
+                <strong>参照元判定:</strong> {html_escape(source_confidence or "-")} / {html_escape(source_evidence or "-")}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     st.markdown('<div class="section-title">メルカリ取得情報</div>', unsafe_allow_html=True)
     render_source_listing_info(st, row, processed)
@@ -8145,8 +8853,8 @@ def render_selected_preview(
     with detail_col2:
         st.markdown('<div class="section-title">Specifics補完サマリー</div>', unsafe_allow_html=True)
         render_specifics_compact_summary(st, row, processed)
-    st.markdown('<div class="section-title">Specifics項目別チェック</div>', unsafe_allow_html=True)
-    render_specifics_review(st, row, processed)
+    with st.expander("Specifics項目別チェック（37項目）", expanded=False):
+        render_specifics_review(st, row, processed)
 
 
 if __name__ == "__main__":

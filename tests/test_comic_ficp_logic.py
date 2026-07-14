@@ -40,7 +40,9 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     build_preview_image_urls,
     build_review_table,
     build_preview_metric_items,
+    build_selected_decision_html,
     build_source_detail_preview,
+    build_workflow_steps_html,
     create_public_user,
     build_specifics_review_rows,
     build_specifics_summary_items,
@@ -62,11 +64,13 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     detect_unlistable_listing_issue,
     estimate_book_weight_g,
     estimate_packaging_weight_kg,
+    estimate_ui_remaining_seconds,
     extract_json_object,
     extract_listing_payload,
     extract_buyer_relevant_listing_details,
     fetch_usd_jpy_exchange_rate,
     filter_listing_image_urls,
+    format_ui_duration,
     get_uploaded_or_cached_csv,
     guess_columns,
     infer_mercari_url_from_image_url,
@@ -88,6 +92,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     saved_api_key_exists,
     save_processed_dataframe_cache,
     save_uploaded_csv_cache,
+    summarize_ui_rows,
     translate_description_added_text_to_japanese,
     BeautifulSoup,
 )
@@ -109,6 +114,62 @@ class FakeStreamlit:
 
 
 class ComicFicpLogicTest(unittest.TestCase):
+    def test_workflow_steps_marks_completed_active_and_pending_states(self):
+        markup = build_workflow_steps_html(3)
+
+        self.assertEqual(markup.count('class="workflow-step '), 5)
+        self.assertEqual(markup.count("is-complete"), 2)
+        self.assertEqual(markup.count("is-active"), 1)
+        self.assertEqual(markup.count("is-pending"), 2)
+        self.assertIn('aria-current="step"', markup)
+        self.assertIn("自動補完", markup)
+
+    def test_processing_time_helpers_format_and_estimate_remaining(self):
+        self.assertEqual(format_ui_duration(0), "0秒")
+        self.assertEqual(format_ui_duration(65), "1分05秒")
+        self.assertEqual(format_ui_duration(3660), "1時間01分")
+        self.assertEqual(format_ui_duration(None), "計測中")
+        self.assertEqual(estimate_ui_remaining_seconds(30, 2, 5), 45.0)
+        self.assertEqual(estimate_ui_remaining_seconds(30, 5, 5), 0.0)
+        self.assertIsNone(estimate_ui_remaining_seconds(30, 0, 5))
+
+    def test_ui_row_summary_separates_ready_review_excluded_and_unprocessed(self):
+        frame = pd.DataFrame(
+            [
+                {"Scrape Status": "ok", "Listing Eligibility": "OK", "Needs Review": "No"},
+                {"Scrape Status": "ok", "Listing Eligibility": "OK", "Needs Review": "Yes"},
+                {"Scrape Status": "ok", "Listing Eligibility": "Excluded", "Needs Review": "Yes"},
+                {
+                    "Title": "Not processed",
+                    "Scrape Status": "",
+                    "Listing Eligibility": "",
+                    "Needs Review": "",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            summarize_ui_rows(frame),
+            {"total": 4, "processed": 3, "ready": 1, "review": 1, "excluded": 1, "remaining": 1},
+        )
+
+    def test_selected_decision_highlights_output_and_image_safety(self):
+        row = pd.Series(
+            {
+                "Listing Eligibility": "OK",
+                "Needs Review": "No",
+                "Image URL Validation Status": "ok: 4 same-listing images; rejected 7 off-listing images",
+                "Rejected Source Image URL Count": "7",
+            }
+        )
+
+        markup = build_selected_decision_html(row, processed=True)
+
+        self.assertIn("出力可能", markup)
+        self.assertIn("画像検証済み", markup)
+        self.assertIn("商品外画像 7件を除外", markup)
+        self.assertIn("decision-success", markup)
+
     def test_uploaded_csv_is_cached_for_query_link_reruns(self):
         fake_st = FakeStreamlit()
         raw = b"Title,PicURL\nOne,https://example.com/image.jpg\n"
