@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-14-image-scope-v1"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-14-api-cost-v2"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -106,6 +106,35 @@ OPENAI_MODEL_OPTIONS = [
     ("gpt-5.4-pro", "GPT-5.4 pro (high accuracy / high cost)"),
     ("gpt-5.5-pro", "GPT-5.5 pro (highest accuracy / high cost)"),
     ("custom", "Custom model name"),
+]
+API_PRICING_LAST_VERIFIED = "2026-07-14"
+# Standard paid rates in USD per 1M tokens. Recheck before changing the verified date:
+# https://ai.google.dev/gemini-api/docs/pricing
+# https://developers.openai.com/api/docs/models
+API_PRICING_USD_PER_MILLION = {
+    ("gemini", "gemini-2.5-flash-lite"): {"input": 0.10, "cached_input": 0.01, "output": 0.40},
+    ("gemini", "gemini-2.5-flash"): {"input": 0.30, "cached_input": 0.03, "output": 2.50},
+    ("gemini", "gemini-2.5-pro"): {"input": 1.25, "cached_input": 0.125, "output": 10.00},
+    ("gemini", "gemini-3.1-flash-lite"): {"input": 0.25, "cached_input": 0.025, "output": 1.50},
+    ("gemini", "gemini-3-flash-preview"): {"input": 0.50, "cached_input": 0.05, "output": 3.00},
+    ("gemini", "gemini-3.5-flash"): {"input": 0.75, "cached_input": 0.08, "output": 4.50},
+    ("gemini", "gemini-3.1-pro-preview"): {"input": 2.00, "cached_input": 0.20, "output": 12.00},
+    ("openai", "gpt-5.4-mini"): {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+    ("openai", "gpt-5.4-nano"): {"input": 0.20, "cached_input": 0.02, "output": 1.25},
+    ("openai", "gpt-5.4"): {"input": 2.50, "cached_input": 0.25, "output": 15.00},
+    ("openai", "gpt-5.5"): {"input": 5.00, "cached_input": 0.50, "output": 30.00},
+    ("openai", "gpt-5.4-pro"): {"input": 30.00, "cached_input": 30.00, "output": 180.00},
+    ("openai", "gpt-5.5-pro"): {"input": 30.00, "cached_input": 30.00, "output": 180.00},
+}
+AI_USAGE_AUDIT_COLUMNS = [
+    "AI API Calls",
+    "AI Input Tokens",
+    "AI Cached Input Tokens",
+    "AI Output Tokens",
+    "AI Total Tokens",
+    "AI Estimated Cost USD",
+    "AI Estimated Cost JPY",
+    "AI Pricing Status",
 ]
 
 DEFAULT_SPECIFIC_COLUMNS = [
@@ -437,6 +466,25 @@ class SpecificsInference:
 
 
 @dataclass
+class APIUsage:
+    provider: str = ""
+    model: str = ""
+    calls: int = 0
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    pricing_status: str = "not used"
+
+
+@dataclass
+class AIAPIResponse:
+    text: str = ""
+    usage: APIUsage = field(default_factory=APIUsage)
+
+
+@dataclass
 class AIEnrichment:
     provider: str = ""
     model: str = ""
@@ -446,6 +494,7 @@ class AIEnrichment:
     description_notes: list[str] = field(default_factory=list)
     specifics: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    usage: APIUsage = field(default_factory=APIUsage)
 
 
 @dataclass
@@ -461,6 +510,75 @@ class ReferenceBookCountResult:
 def clean_text(value: object) -> str:
     text = unescape(str(value or ""))
     return re.sub(r"\s+", " ", text).strip()
+
+
+def safe_int(value: object) -> int:
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def get_api_pricing(provider: object, model: object) -> dict[str, float]:
+    provider_name = clean_text(provider).lower()
+    model_name = clean_text(model).lower()
+    candidates = sorted(API_PRICING_USD_PER_MILLION.items(), key=lambda item: len(item[0][1]), reverse=True)
+    for (candidate_provider, candidate_model), pricing in candidates:
+        if provider_name != candidate_provider:
+            continue
+        if model_name == candidate_model or model_name.startswith(f"{candidate_model}-"):
+            return dict(pricing)
+    return {}
+
+
+def estimate_api_cost_usd(
+    provider: object,
+    model: object,
+    input_tokens: object,
+    cached_input_tokens: object,
+    output_tokens: object,
+) -> tuple[float, str]:
+    pricing = get_api_pricing(provider, model)
+    if not pricing:
+        return 0.0, "price unavailable"
+    input_count = safe_int(input_tokens)
+    cached_count = min(input_count, safe_int(cached_input_tokens))
+    uncached_count = max(0, input_count - cached_count)
+    output_count = safe_int(output_tokens)
+    cost = (
+        uncached_count * pricing["input"]
+        + cached_count * pricing["cached_input"]
+        + output_count * pricing["output"]
+    ) / 1_000_000
+    return round(cost, 9), f"standard paid estimate ({API_PRICING_LAST_VERIFIED})"
+
+
+def build_api_usage(
+    provider: str,
+    model: str,
+    input_tokens: object,
+    cached_input_tokens: object,
+    output_tokens: object,
+    total_tokens: object = 0,
+) -> APIUsage:
+    input_count = safe_int(input_tokens)
+    cached_count = min(input_count, safe_int(cached_input_tokens))
+    output_count = safe_int(output_tokens)
+    total_count = safe_int(total_tokens) or input_count + output_count
+    cost, pricing_status = estimate_api_cost_usd(provider, model, input_count, cached_count, output_count)
+    if not any([input_count, cached_count, output_count, total_count]):
+        pricing_status = "usage unavailable"
+    return APIUsage(
+        provider=provider,
+        model=model,
+        calls=1,
+        input_tokens=input_count,
+        cached_input_tokens=cached_count,
+        output_tokens=output_count,
+        total_tokens=total_count,
+        estimated_cost_usd=cost,
+        pricing_status=pricing_status,
+    )
 
 
 def truncate_text(value: object, limit: int = 600) -> str:
@@ -1591,6 +1709,7 @@ def build_export_dataframe(
     export_frame = apply_export_picurl_policy(export_frame)
     export_frame = apply_export_condition_id_policy(export_frame)
     export_frame = apply_export_unit_type_policy(export_frame)
+    export_frame = export_frame.drop(columns=AI_USAGE_AUDIT_COLUMNS, errors="ignore")
     if free_shipping_rollup and free_shipping_rollup.enabled:
         export_frame = apply_free_shipping_rollup(export_frame, free_shipping_rollup)
     return export_frame
@@ -3670,7 +3789,7 @@ def parse_gemini_response_text(payload: dict) -> str:
     return "\n".join(parts)
 
 
-def call_openai_ai_enrichment(api_key: str, model: str, prompt: str) -> str:
+def call_openai_ai_enrichment(api_key: str, model: str, prompt: str) -> AIAPIResponse:
     if requests is None:
         raise RuntimeError("requests is not installed")
     response = requests.post(
@@ -3693,13 +3812,22 @@ def call_openai_ai_enrichment(api_key: str, model: str, prompt: str) -> str:
         timeout=45,
     )
     response.raise_for_status()
-    text = parse_openai_response_text(response.json())
-    if not text:
-        raise RuntimeError("OpenAI response did not include text")
-    return text
+    data = response.json()
+    usage_data = data.get("usage", {}) if isinstance(data, dict) else {}
+    input_details = usage_data.get("input_tokens_details", {}) if isinstance(usage_data, dict) else {}
+    usage = build_api_usage(
+        "openai",
+        model,
+        usage_data.get("input_tokens", 0),
+        input_details.get("cached_tokens", 0) if isinstance(input_details, dict) else 0,
+        usage_data.get("output_tokens", 0),
+        usage_data.get("total_tokens", 0),
+    )
+    text = parse_openai_response_text(data)
+    return AIAPIResponse(text=text, usage=usage)
 
 
-def call_gemini_ai_enrichment(api_key: str, model: str, prompt: str) -> str:
+def call_gemini_ai_enrichment(api_key: str, model: str, prompt: str) -> AIAPIResponse:
     if requests is None:
         raise RuntimeError("requests is not installed")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -3727,10 +3855,27 @@ def call_gemini_ai_enrichment(api_key: str, model: str, prompt: str) -> str:
         timeout=45,
     )
     response.raise_for_status()
-    text = parse_gemini_response_text(response.json())
-    if not text:
-        raise RuntimeError("Gemini response did not include text")
-    return text
+    data = response.json()
+    usage_data = data.get("usageMetadata", {}) if isinstance(data, dict) else {}
+    output_tokens = safe_int(usage_data.get("candidatesTokenCount", 0)) + safe_int(
+        usage_data.get("thoughtsTokenCount", 0)
+    )
+    usage = build_api_usage(
+        "gemini",
+        model,
+        usage_data.get("promptTokenCount", 0),
+        usage_data.get("cachedContentTokenCount", 0),
+        output_tokens,
+        usage_data.get("totalTokenCount", 0),
+    )
+    text = parse_gemini_response_text(data)
+    return AIAPIResponse(text=text, usage=usage)
+
+
+def normalize_ai_api_response(response: object, provider: str, model: str) -> AIAPIResponse:
+    if isinstance(response, AIAPIResponse):
+        return response
+    return AIAPIResponse(text=str(response or ""), usage=APIUsage(provider=provider, model=model))
 
 
 def enrich_listing_with_ai(
@@ -3758,13 +3903,21 @@ def enrich_listing_with_ai(
     )
     try:
         if provider == "openai":
-            response_text = call_openai_ai_enrichment(api_key, model, prompt)
+            response = call_openai_ai_enrichment(api_key, model, prompt)
         else:
             provider = "gemini"
-            response_text = call_gemini_ai_enrichment(api_key, model, prompt)
-        return parse_ai_enrichment_payload(response_text, provider, model, candidate_columns)
+            response = call_gemini_ai_enrichment(api_key, model, prompt)
+        normalized_response = normalize_ai_api_response(response, provider, model)
+        enrichment = parse_ai_enrichment_payload(normalized_response.text, provider, model, candidate_columns)
+        enrichment.usage = normalized_response.usage
+        return enrichment
     except Exception as error:
-        return AIEnrichment(provider=provider, model=model, status=format_ai_error_status(provider, error))
+        return AIEnrichment(
+            provider=provider,
+            model=model,
+            status=format_ai_error_status(provider, error),
+            usage=APIUsage(provider=provider, model=model, calls=1, pricing_status="usage unavailable"),
+        )
 
 
 def merge_ai_specifics(specifics: SpecificsInference, ai: AIEnrichment, candidate_columns: Iterable[str]) -> None:
@@ -5411,6 +5564,21 @@ def find_product_overview_content_container(heading_element) -> object:
     return None
 
 
+def apply_api_usage_to_row(row: pd.Series, usage: APIUsage, exchange_rate_jpy_per_usd: float) -> pd.Series:
+    if not usage or safe_int(usage.calls) <= 0:
+        return row
+    exchange_rate = float(exchange_rate_jpy_per_usd or DEFAULT_EXCHANGE_RATE_JPY_PER_USD)
+    row["AI API Calls"] = str(safe_int(usage.calls))
+    row["AI Input Tokens"] = str(safe_int(usage.input_tokens))
+    row["AI Cached Input Tokens"] = str(safe_int(usage.cached_input_tokens))
+    row["AI Output Tokens"] = str(safe_int(usage.output_tokens))
+    row["AI Total Tokens"] = str(safe_int(usage.total_tokens))
+    row["AI Estimated Cost USD"] = f"{float(usage.estimated_cost_usd or 0):.9f}"
+    row["AI Estimated Cost JPY"] = f"{float(usage.estimated_cost_usd or 0) * exchange_rate:.6f}"
+    row["AI Pricing Status"] = clean_text(usage.pricing_status) or "usage unavailable"
+    return row
+
+
 def process_dataframe(
     frame: pd.DataFrame,
     config: ProcessingConfig,
@@ -5489,6 +5657,7 @@ def process_dataframe(
         "AI Enrichment Status",
         "AI Description Notes",
         "AI Specifics Suggestions",
+        *AI_USAGE_AUDIT_COLUMNS,
     ]:
         if col not in output.columns:
             output[col] = ""
@@ -5504,6 +5673,8 @@ def process_dataframe(
     try:
         for position, index in enumerate(target_indices, start=1):
             row = output.loc[index].copy()
+            for usage_column in AI_USAGE_AUDIT_COLUMNS:
+                row[usage_column] = ""
             provided_url = get_row_value(row, config.url_col)
             csv_image_urls = parse_image_urls(get_row_value(row, config.image_col))
             row["Source Image URLs"] = "|".join(csv_image_urls)
@@ -5908,6 +6079,7 @@ def process_dataframe(
             row["AI Enrichment Status"] = ai_enrichment.status
             row["AI Description Notes"] = "; ".join(ai_enrichment.description_notes)
             row["AI Specifics Suggestions"] = format_specifics_field_map(ai_enrichment.specifics)
+            row = apply_api_usage_to_row(row, ai_enrichment.usage, config.exchange_rate_jpy_per_usd)
             row["Specifics Fill Notes"] = "; ".join(specifics_cleanup_notes + specifics_fill_notes + specifics.notes)
             row["Specifics Filled Fields"] = format_specifics_field_map(specifics_summary["filled"])
             row["Specifics Existing Fields"] = format_specifics_field_map(specifics_summary["existing"])
@@ -6112,6 +6284,118 @@ def summarize_ui_rows(frame: pd.DataFrame) -> dict[str, int]:
     }
 
 
+def summarize_api_costs(
+    frame: pd.DataFrame,
+    exchange_rate_jpy_per_usd: float = DEFAULT_EXCHANGE_RATE_JPY_PER_USD,
+) -> dict[str, object]:
+    def numeric_column(column: str) -> pd.Series:
+        if column not in frame.columns:
+            return pd.Series(0.0, index=frame.index, dtype=float)
+        return pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+
+    calls_by_row = numeric_column("AI API Calls")
+    called_mask = calls_by_row.gt(0)
+    total_calls = int(round(float(calls_by_row.sum())))
+    pricing_status = (
+        frame.get("AI Pricing Status", pd.Series("", index=frame.index))
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+    priced_mask = called_mask & pricing_status.str.startswith("standard paid estimate")
+    priced_calls = int(round(float(calls_by_row[priced_mask].sum())))
+    usage_unavailable_mask = called_mask & pricing_status.eq("usage unavailable")
+    usage_unavailable_calls = int(round(float(calls_by_row[usage_unavailable_mask].sum())))
+
+    model_labels: list[str] = []
+    unknown_pricing_models: list[str] = []
+    for index in frame.index[called_mask]:
+        provider = get_row_value(frame.loc[index], "AI Provider").lower()
+        model = get_row_value(frame.loc[index], "AI Model")
+        label = f"{provider.capitalize()} / {model}" if provider and model else model or provider or "モデル不明"
+        if label not in model_labels:
+            model_labels.append(label)
+        if model and not get_api_pricing(provider, model):
+            unknown_label = f"{provider or 'unknown'}:{model}"
+            if unknown_label not in unknown_pricing_models:
+                unknown_pricing_models.append(unknown_label)
+
+    total_cost_usd = float(numeric_column("AI Estimated Cost USD").sum())
+    exchange_rate = float(exchange_rate_jpy_per_usd or DEFAULT_EXCHANGE_RATE_JPY_PER_USD)
+    return {
+        "rows": int(len(frame)),
+        "calls": total_calls,
+        "priced_calls": priced_calls,
+        "unpriced_calls": max(0, total_calls - priced_calls),
+        "usage_unavailable_calls": usage_unavailable_calls,
+        "input_tokens": int(round(float(numeric_column("AI Input Tokens").sum()))),
+        "cached_input_tokens": int(round(float(numeric_column("AI Cached Input Tokens").sum()))),
+        "output_tokens": int(round(float(numeric_column("AI Output Tokens").sum()))),
+        "total_tokens": int(round(float(numeric_column("AI Total Tokens").sum()))),
+        "total_cost_usd": total_cost_usd,
+        "total_cost_jpy": total_cost_usd * exchange_rate,
+        "exchange_rate": exchange_rate,
+        "pricing_date": API_PRICING_LAST_VERIFIED,
+        "model_labels": model_labels,
+        "unknown_pricing_models": unknown_pricing_models,
+        "cost_complete": total_calls == priced_calls,
+    }
+
+
+def render_api_cost_summary(st, summary: dict[str, object]) -> None:
+    calls = safe_int(summary.get("calls", 0))
+    priced_calls = safe_int(summary.get("priced_calls", 0))
+    total_tokens = safe_int(summary.get("total_tokens", 0))
+    total_cost_usd = float(summary.get("total_cost_usd", 0) or 0)
+    total_cost_jpy = float(summary.get("total_cost_jpy", 0) or 0)
+    cost_complete = bool(summary.get("cost_complete", calls == priced_calls))
+
+    if calls == 0:
+        amount_jpy = "約¥0"
+        amount_usd = "$0.000000"
+        badge = "API呼び出しなし"
+    elif priced_calls == 0:
+        amount_jpy = "算出不可"
+        amount_usd = "usageまたは単価を確認できません"
+        badge = "料金未確定"
+    else:
+        jpy_digits = 4 if abs(total_cost_jpy) < 1 else 2
+        amount_jpy = f"約¥{total_cost_jpy:,.{jpy_digits}f}"
+        amount_usd = f"${total_cost_usd:.6f}"
+        badge = "標準料金で概算" if cost_complete else "一部算出不可"
+
+    model_labels = summary.get("model_labels", [])
+    model_text = " ｜ ".join(str(value) for value in model_labels) if isinstance(model_labels, list) else str(model_labels or "")
+    if not model_text:
+        model_text = "AI未使用"
+    st.markdown(
+        f"""
+        <section class="api-cost-card" aria-label="直近のAI API料金">
+          <div class="api-cost-heading">直近1回のAI API料金（概算）</div>
+          <div class="api-cost-main"><strong>{html_escape(amount_jpy)}</strong><span>{html_escape(amount_usd)}</span></div>
+          <div class="api-cost-badge">{html_escape(badge)}</div>
+          <div class="api-cost-meta">{calls:,}回・{total_tokens:,} tokens<br>{html_escape(model_text)}</div>
+          <div class="api-cost-tokens">input {safe_int(summary.get('input_tokens', 0)):,} / cached {safe_int(summary.get('cached_input_tokens', 0)):,} / output {safe_int(summary.get('output_tokens', 0)):,}</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"API応答の使用トークンと{summary.get('pricing_date', API_PRICING_LAST_VERIFIED)}時点の標準有料単価から算出しています。"
+        f"1USD={float(summary.get('exchange_rate', DEFAULT_EXCHANGE_RATE_JPY_PER_USD) or DEFAULT_EXCHANGE_RATE_JPY_PER_USD):.2f}円換算。"
+        "Gemini無料枠や個別契約では、実際の請求額がこれより低い場合があります。"
+    )
+    warnings: list[str] = []
+    unknown_pricing_models = summary.get("unknown_pricing_models", [])
+    if isinstance(unknown_pricing_models, list) and unknown_pricing_models:
+        warnings.append("料金表未登録: " + ", ".join(str(value) for value in unknown_pricing_models))
+    usage_unavailable_calls = safe_int(summary.get("usage_unavailable_calls", 0))
+    if usage_unavailable_calls:
+        warnings.append(f"usage未取得: {usage_unavailable_calls}回")
+    if warnings:
+        st.warning("算出できないAPI呼び出しがあります（" + " / ".join(warnings) + "）。0円とはみなしていません。")
+
+
 def build_workflow_steps_html(active_step: int) -> str:
     """Build the five-step workflow navigation used before and after upload."""
     active = max(1, min(5, int(active_step)))
@@ -6225,7 +6509,11 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
 
     restore_processed_cache = using_cached_upload or has_product_select_query(st)
     active_frame = st.session_state.get("comic_ficp_processed_df")
-    if active_frame is None or st.session_state.get("comic_ficp_file_key") != file_key:
+    previous_file_key = st.session_state.get("comic_ficp_file_key")
+    if active_frame is None or previous_file_key != file_key:
+        if previous_file_key != file_key:
+            st.session_state.pop("comic_ficp_last_api_cost_summary", None)
+            st.session_state.pop("comic_ficp_last_api_cost_file_key", None)
         cached_processed_frame = load_processed_dataframe_cache(file_key) if restore_processed_cache else None
         active_frame = cached_processed_frame if cached_processed_frame is not None else frame
         st.session_state["comic_ficp_processed_df"] = active_frame
@@ -6691,10 +6979,13 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                     use_container_width=True,
                 )
             feedback_slot = st.empty()
+            api_cost_slot = st.empty()
             download_slot = st.empty()
 
     if clear_results:
         st.session_state["comic_ficp_processed_df"] = frame
+        st.session_state.pop("comic_ficp_last_api_cost_summary", None)
+        st.session_state.pop("comic_ficp_last_api_cost_file_key", None)
         active_frame = frame
         save_processed_dataframe_cache(active_frame, file_key)
         workflow_slot.markdown(build_workflow_steps_html(2), unsafe_allow_html=True)
@@ -6708,12 +6999,6 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         workflow_slot.markdown(build_workflow_steps_html(3), unsafe_allow_html=True)
         with feedback_slot.container():
             progress_bar = st.progress(0.0, text=f"0/{total_hint}件（0.0%）")
-            progress_columns = st.columns(4)
-            progress_metrics = [column.empty() for column in progress_columns]
-            progress_metrics[0].metric("進捗", "0.0%")
-            progress_metrics[1].metric("完了", f"0/{total_hint}件")
-            progress_metrics[2].metric("経過時間", "0秒")
-            progress_metrics[3].metric("残り時間", "計測中")
             progress_text = st.empty()
             progress_text.info("最初の商品を処理しています。1件完了後から残り時間を予測します。")
             run_status = st.status(f"処理中: 0/{total_hint}件", expanded=False)
@@ -6731,10 +7016,6 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                     else "計測中"
                 )
                 progress_bar.progress(fraction, text=f"{current}/{total}件（{percent:.1f}%）")
-                progress_metrics[0].metric("進捗", f"{percent:.1f}%")
-                progress_metrics[1].metric("完了", f"{current}/{total}件")
-                progress_metrics[2].metric("経過時間", format_ui_duration(elapsed))
-                progress_metrics[3].metric("残り時間", remaining_label)
                 progress_text.info(f"現在: {label[:76]}　｜　完了予測: {eta_label}")
                 run_status.update(
                     label=f"処理中: {current}/{total}件（残り約 {remaining_label}）",
@@ -6742,14 +7023,13 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                 )
 
             active_frame = process_dataframe(active_frame, config, row_indices=indices, progress_callback=progress)
+            run_cost_summary = summarize_api_costs(active_frame.loc[indices], config.exchange_rate_jpy_per_usd)
+            st.session_state["comic_ficp_last_api_cost_summary"] = run_cost_summary
+            st.session_state["comic_ficp_last_api_cost_file_key"] = file_key
             st.session_state["comic_ficp_processed_df"] = active_frame
             save_processed_dataframe_cache(active_frame, file_key)
             elapsed_total = time.monotonic() - started_at
             progress_bar.progress(1.0, text=f"{total_hint}/{total_hint}件（100.0%）")
-            progress_metrics[0].metric("進捗", "100.0%")
-            progress_metrics[1].metric("完了", f"{total_hint}/{total_hint}件")
-            progress_metrics[2].metric("経過時間", format_ui_duration(elapsed_total))
-            progress_metrics[3].metric("残り時間", "0秒")
             progress_text.success(f"処理が完了しました（{time.strftime('%H:%M:%S')}）。")
             run_status.update(label=f"処理完了（{format_ui_duration(elapsed_total)}）", state="complete")
             post_summary = summarize_ui_rows(active_frame)
@@ -6761,6 +7041,12 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             st.session_state[view_key] = "投入前チェック"
         post_active_step = 4 if post_summary["remaining"] or post_summary["review"] or post_summary["excluded"] else 5
         workflow_slot.markdown(build_workflow_steps_html(post_active_step), unsafe_allow_html=True)
+
+    last_api_cost_summary = st.session_state.get("comic_ficp_last_api_cost_summary")
+    last_api_cost_file_key = st.session_state.get("comic_ficp_last_api_cost_file_key")
+    if isinstance(last_api_cost_summary, dict) and last_api_cost_file_key == file_key:
+        with api_cost_slot.container():
+            render_api_cost_summary(st, last_api_cost_summary)
 
     export_frame = build_export_dataframe(active_frame, rollup_options)
     excluded_count = len(active_frame) - len(export_frame)
@@ -7185,6 +7471,54 @@ def render_global_styles(st) -> None:
         .status-item.status-excluded::before { background: #ef4444; }
         .status-progress { height: 4px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
         .status-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4f46e5, #14b8a6); }
+        .api-cost-card {
+            position: relative;
+            margin: 10px 0 4px;
+            padding: 15px 16px;
+            overflow: hidden;
+            border: 1px solid #c7d2fe;
+            border-radius: 15px;
+            background: linear-gradient(135deg, #eef2ff 0%, #ffffff 62%, #ecfeff 100%);
+            box-shadow: 0 8px 22px rgba(79, 70, 229, 0.08);
+        }
+        .api-cost-card::after {
+            content: "";
+            position: absolute;
+            width: 92px;
+            height: 92px;
+            right: -36px;
+            top: -42px;
+            border-radius: 999px;
+            background: rgba(20, 184, 166, 0.10);
+        }
+        .api-cost-heading {
+            color: #4338ca !important;
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+        }
+        .api-cost-main {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            margin-top: 5px;
+            flex-wrap: wrap;
+        }
+        .api-cost-main strong { color: #172033 !important; font-size: 25px; line-height: 1.15; }
+        .api-cost-main span { color: #64748b !important; font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+        .api-cost-badge {
+            display: inline-flex;
+            margin-top: 8px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            background: #ffffff;
+            color: #0f766e !important;
+            font-size: 11px;
+            font-weight: 800;
+            border: 1px solid #ccfbf1;
+        }
+        .api-cost-meta { margin-top: 9px; color: #475569 !important; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+        .api-cost-tokens { margin-top: 5px; color: #64748b !important; font-size: 11px; overflow-wrap: anywhere; }
         .mapping-ok, .mapping-miss {
             display: inline-block;
             border-radius: 999px;

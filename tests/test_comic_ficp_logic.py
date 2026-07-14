@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from comic_ficp_streamlit_app import (  # noqa: E402
     AIEnrichment,
+    APIUsage,
     AUTOFILL_MARKER_START,
     DEFAULT_BOOK_WEIGHT_G,
     DEFAULT_FICP_ZONE,
@@ -33,6 +34,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     apply_item_specifics,
     build_description_append,
     build_description_append_display_text,
+    build_api_usage,
     build_ebay_preflight_table,
     build_exclusion_table,
     build_export_dataframe,
@@ -51,6 +53,8 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     calculate_ficp_shipping,
     calculate_fuel_surcharge_jpy,
     calculate_shipping_total_with_fuel,
+    call_gemini_ai_enrichment,
+    call_openai_ai_enrichment,
     clean_source_listing_description,
     contains_japanese_text,
     delete_saved_api_key,
@@ -63,6 +67,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     detect_magazine_listing_issue,
     detect_unlistable_listing_issue,
     estimate_book_weight_g,
+    estimate_api_cost_usd,
     estimate_packaging_weight_kg,
     estimate_ui_remaining_seconds,
     extract_json_object,
@@ -71,6 +76,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     fetch_usd_jpy_exchange_rate,
     filter_listing_image_urls,
     format_ui_duration,
+    get_api_pricing,
     get_uploaded_or_cached_csv,
     guess_columns,
     infer_mercari_url_from_image_url,
@@ -93,6 +99,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     save_processed_dataframe_cache,
     save_uploaded_csv_cache,
     summarize_ui_rows,
+    summarize_api_costs,
     translate_description_added_text_to_japanese,
     BeautifulSoup,
 )
@@ -132,6 +139,13 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertEqual(estimate_ui_remaining_seconds(30, 2, 5), 45.0)
         self.assertEqual(estimate_ui_remaining_seconds(30, 5, 5), 0.0)
         self.assertIsNone(estimate_ui_remaining_seconds(30, 0, 5))
+
+    def test_processing_ui_does_not_render_redundant_four_metric_cards(self):
+        source = (ROOT / "comic_ficp_streamlit_app.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("progress_metrics", source)
+        self.assertIn("progress_bar = st.progress", source)
+        self.assertIn("render_api_cost_summary", source)
 
     def test_ui_row_summary_separates_ready_review_excluded_and_unprocessed(self):
         frame = pd.DataFrame(
@@ -238,6 +252,131 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertIn("custom", openai_ids)
         self.assertEqual(default_ai_model_for_provider("gemini"), DEFAULT_GEMINI_MODEL)
         self.assertEqual(default_ai_model_for_provider("openai"), DEFAULT_OPENAI_MODEL)
+
+    def test_api_cost_estimates_use_cached_and_output_token_rates(self):
+        gemini_cost, gemini_status = estimate_api_cost_usd(
+            "gemini", "gemini-2.5-flash-lite", 1000, 200, 500
+        )
+        openai_cost, openai_status = estimate_api_cost_usd(
+            "openai", "gpt-5.4-mini", 1000, 0, 500
+        )
+
+        self.assertAlmostEqual(gemini_cost, 0.000282, places=9)
+        self.assertAlmostEqual(openai_cost, 0.003, places=9)
+        self.assertIn("standard paid estimate", gemini_status)
+        self.assertIn("standard paid estimate", openai_status)
+        self.assertEqual(get_api_pricing("openai", "gpt-5.4-mini-2026-07-01")["output"], 4.50)
+
+    def test_unknown_api_model_is_not_treated_as_known_zero_cost(self):
+        cost, status = estimate_api_cost_usd("openai", "custom-private-model", 1000, 0, 500)
+        missing_usage = build_api_usage("openai", "gpt-5.4-mini", 0, 0, 0, 0)
+
+        self.assertEqual(cost, 0.0)
+        self.assertEqual(status, "price unavailable")
+        self.assertEqual(get_api_pricing("openai", "custom-private-model"), {})
+        self.assertEqual(missing_usage.calls, 1)
+        self.assertEqual(missing_usage.pricing_status, "usage unavailable")
+
+    def test_openai_response_preserves_usage_tokens(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "output_text": '{"book_count": 2}',
+            "usage": {
+                "input_tokens": 500,
+                "input_tokens_details": {"cached_tokens": 50},
+                "output_tokens": 70,
+                "total_tokens": 570,
+            },
+        }
+
+        with patch("comic_ficp_streamlit_app.requests.post", return_value=response):
+            result = call_openai_ai_enrichment("test-key", "gpt-5.4-mini", "prompt")
+
+        self.assertIn("book_count", result.text)
+        self.assertEqual(result.usage.calls, 1)
+        self.assertEqual(result.usage.input_tokens, 500)
+        self.assertEqual(result.usage.cached_input_tokens, 50)
+        self.assertEqual(result.usage.output_tokens, 70)
+        self.assertEqual(result.usage.total_tokens, 570)
+
+    def test_empty_ai_text_still_preserves_billable_usage(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "output": [],
+            "usage": {"input_tokens": 300, "output_tokens": 12, "total_tokens": 312},
+        }
+
+        with patch("comic_ficp_streamlit_app.requests.post", return_value=response):
+            result = call_openai_ai_enrichment("test-key", "gpt-5.4-mini", "prompt")
+
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.usage.calls, 1)
+        self.assertEqual(result.usage.total_tokens, 312)
+        self.assertGreater(result.usage.estimated_cost_usd, 0)
+
+    def test_gemini_response_preserves_usage_tokens_including_thoughts(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": '{"book_count": 2}'}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 400,
+                "cachedContentTokenCount": 100,
+                "candidatesTokenCount": 60,
+                "thoughtsTokenCount": 20,
+                "totalTokenCount": 480,
+            },
+        }
+
+        with patch("comic_ficp_streamlit_app.requests.post", return_value=response):
+            result = call_gemini_ai_enrichment("test-key", "gemini-2.5-flash-lite", "prompt")
+
+        self.assertIn("book_count", result.text)
+        self.assertEqual(result.usage.calls, 1)
+        self.assertEqual(result.usage.input_tokens, 400)
+        self.assertEqual(result.usage.cached_input_tokens, 100)
+        self.assertEqual(result.usage.output_tokens, 80)
+        self.assertEqual(result.usage.total_tokens, 480)
+
+    def test_api_cost_summary_combines_usage_and_marks_unpriced_calls(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "AI Provider": "openai",
+                    "AI Model": "gpt-5.4-mini",
+                    "AI API Calls": "1",
+                    "AI Input Tokens": "1000",
+                    "AI Cached Input Tokens": "0",
+                    "AI Output Tokens": "500",
+                    "AI Total Tokens": "1500",
+                    "AI Estimated Cost USD": "0.003",
+                    "AI Pricing Status": "standard paid estimate (2026-07-14)",
+                },
+                {
+                    "AI Provider": "gemini",
+                    "AI Model": "custom-model",
+                    "AI API Calls": "1",
+                    "AI Input Tokens": "200",
+                    "AI Output Tokens": "20",
+                    "AI Total Tokens": "220",
+                    "AI Estimated Cost USD": "0",
+                    "AI Pricing Status": "price unavailable",
+                },
+            ]
+        )
+
+        summary = summarize_api_costs(frame, 155)
+
+        self.assertEqual(summary["calls"], 2)
+        self.assertEqual(summary["priced_calls"], 1)
+        self.assertEqual(summary["unpriced_calls"], 1)
+        self.assertEqual(summary["total_tokens"], 1720)
+        self.assertAlmostEqual(summary["total_cost_usd"], 0.003)
+        self.assertAlmostEqual(summary["total_cost_jpy"], 0.465)
+        self.assertFalse(summary["cost_complete"])
+        self.assertEqual(summary["unknown_pricing_models"], ["gemini:custom-model"])
 
     def test_guess_columns_does_not_treat_shipping_profile_as_shipping_cost(self):
         guessed = guess_columns(["StartPrice", "ShippingProfileName", "Title"])
@@ -1578,6 +1717,17 @@ class ComicFicpLogicTest(unittest.TestCase):
                 "C:Artist/Writer": "Test Author",
             },
             notes=["matched known title"],
+            usage=APIUsage(
+                provider="gemini",
+                model="gemini-2.5-flash-lite",
+                calls=1,
+                input_tokens=1000,
+                cached_input_tokens=200,
+                output_tokens=500,
+                total_tokens=1500,
+                estimated_cost_usd=0.000282,
+                pricing_status="standard paid estimate (2026-07-14)",
+            ),
         )
         with patch("comic_ficp_streamlit_app.enrich_listing_with_ai", return_value=ai_result) as mocked:
             result = process_dataframe(frame, config)
@@ -1592,6 +1742,14 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertEqual(result.loc[0, "C:Author"], "Test Author")
         self.assertEqual(result.loc[0, "C:Artist/Writer"], "Test Author")
         self.assertIn("C:Genre=Comedy", result.loc[0, "AI Specifics Suggestions"])
+        self.assertEqual(result.loc[0, "AI API Calls"], "1")
+        self.assertEqual(result.loc[0, "AI Total Tokens"], "1500")
+        self.assertEqual(result.loc[0, "AI Estimated Cost USD"], "0.000282000")
+        self.assertEqual(result.loc[0, "AI Estimated Cost JPY"], "0.042300")
+
+        export = build_export_dataframe(result)
+        self.assertNotIn("AI Estimated Cost USD", export.columns)
+        self.assertNotIn("AI Total Tokens", export.columns)
 
     def test_process_dataframe_does_not_use_ai_book_count_for_shipping(self):
         frame = pd.DataFrame(
@@ -2572,6 +2730,10 @@ class ComicFicpLogicTest(unittest.TestCase):
                     "Title": "週刊少年ジャンプ 2024年12号",
                     "Description": "表紙に小さな傷があります。",
                     "Shipping Cost": "",
+                    "AI API Calls": "1",
+                    "AI Total Tokens": "999",
+                    "AI Estimated Cost USD": "0.123",
+                    "AI Pricing Status": "standard paid estimate (old)",
                 },
                 {
                     "商品URL": "",
@@ -2597,6 +2759,9 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertEqual(result.loc[0, "Exclusion Reason"], "雑誌・本誌商品の可能性があるため出品除外")
         self.assertIn("週刊少年ジャンプ", result.loc[0, "Exclusion Evidence"])
         self.assertIn("ダウンロードCSVから除外", result.loc[0, "Description Added Text"])
+        self.assertEqual(result.loc[0, "AI API Calls"], "")
+        self.assertEqual(result.loc[0, "AI Total Tokens"], "")
+        self.assertEqual(result.loc[0, "AI Estimated Cost USD"], "")
         self.assertEqual(result.loc[1, "Listing Eligibility"], "OK")
 
         export = build_export_dataframe(result)
