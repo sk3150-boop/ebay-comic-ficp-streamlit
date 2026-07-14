@@ -45,6 +45,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-14-image-scope-v1"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -1078,12 +1079,71 @@ def merge_image_url_values(*values: object, max_images: int = 24) -> list[str]:
     return result
 
 
+def extract_mercari_item_id(value: object) -> str:
+    text = unquote(unescape(str(value or ""))).replace("\\/", "/")
+    match = re.search(r"(?:^|[/_-])(m\d{8,})(?=[_./?&=#-]|$)", text, flags=re.I)
+    return match.group(1).lower() if match else ""
+
+
+def is_matching_mercari_listing_photo(url: object, item_id: object) -> bool:
+    expected_item_id = str(item_id or "").strip().lower()
+    if not expected_item_id:
+        return False
+    text = unquote(unescape(str(url or "").strip())).replace("\\/", "/")
+    try:
+        parsed = urlparse(text)
+    except Exception:
+        return False
+    host = str(parsed.hostname or "").lower()
+    path = unquote(parsed.path or "")
+    if host != "static.mercdn.net":
+        return False
+    return bool(
+        re.match(
+            rf"^/item/detail/(?:orig/)?photos/{re.escape(expected_item_id)}_\d+\.(?:jpe?g|png|webp)$",
+            path,
+            flags=re.I,
+        )
+    )
+
+
+def filter_listing_image_urls(
+    source_url: object,
+    *values: object,
+    max_images: int = 24,
+) -> list[str]:
+    candidates = merge_image_url_values(*values, max_images=max_images)
+    source_text = str(source_url or "")
+    expected_item_id = (
+        extract_mercari_item_id(source_text)
+        if re.search(r"mercari\.com|mercdn\.net", source_text, flags=re.I)
+        else ""
+    )
+    if not expected_item_id:
+        return candidates
+    return [
+        url
+        for url in candidates
+        if is_matching_mercari_listing_photo(url, expected_item_id)
+    ][:max_images]
+
+
+def image_scope_source_from_row(row: pd.Series) -> str:
+    return first_nonblank(
+        get_row_value(row, "Inferred Source URL"),
+        get_row_value(row, "Main Image URL"),
+        get_row_value(row, "Original PicURL"),
+        get_row_value(row, "PicURL"),
+    )
+
+
 def contains_likely_image_url(value: object) -> bool:
     return any(is_likely_image_url(url) for url in parse_image_urls(value))
 
 
 def build_preview_image_urls(row: pd.Series, image_col: str) -> list[str]:
-    return merge_image_url_values(
+    return filter_listing_image_urls(
+        image_scope_source_from_row(row),
         get_row_value(row, "Main Image URL"),
         get_row_value(row, image_col),
         get_row_value(row, "Source Image URLs"),
@@ -1096,7 +1156,8 @@ def build_table_image_url(row: pd.Series, image_col: str) -> str:
 
 
 def collect_export_pic_urls(row: pd.Series, max_images: int = 24) -> list[str]:
-    return merge_image_url_values(
+    return filter_listing_image_urls(
+        image_scope_source_from_row(row),
         get_row_value(row, "Main Image URL"),
         get_row_value(row, "PicURL"),
         get_row_value(row, "Source Image URLs"),
@@ -1392,6 +1453,7 @@ def apply_export_picurl_policy(frame: pd.DataFrame) -> pd.DataFrame:
     audit_columns = [
         "Original PicURL",
         "Applied PicURL Image Count",
+        "Rejected PicURL Image Count",
         "PicURL Export Status",
     ]
     for column in audit_columns:
@@ -1400,18 +1462,32 @@ def apply_export_picurl_policy(frame: pd.DataFrame) -> pd.DataFrame:
 
     for index, row in result.iterrows():
         original_picurl = get_row_value(row, "PicURL")
+        unvalidated_image_urls = merge_image_url_values(
+            get_row_value(row, "Main Image URL"),
+            get_row_value(row, "PicURL"),
+            get_row_value(row, "Source Image URLs"),
+        )
         image_urls = collect_export_pic_urls(row)
+        rejected_count = max(0, len(unvalidated_image_urls) - len(image_urls))
         result.at[index, "Original PicURL"] = original_picurl
+        result.at[index, "Rejected PicURL Image Count"] = str(rejected_count)
         if image_urls:
             result.at[index, "PicURL"] = "|".join(image_urls)
             result.at[index, "Applied PicURL Image Count"] = str(len(image_urls))
             if len(image_urls) == 1:
-                result.at[index, "PicURL Export Status"] = "kept: one image available"
+                status = "kept: one image available"
             else:
-                result.at[index, "PicURL Export Status"] = f"applied: {len(image_urls)} images"
+                status = f"applied: {len(image_urls)} images"
+            if rejected_count:
+                status = f"{status}; rejected {rejected_count} off-listing images"
+            result.at[index, "PicURL Export Status"] = status
         else:
             result.at[index, "Applied PicURL Image Count"] = "0"
-            result.at[index, "PicURL Export Status"] = "skipped: no image URL available"
+            result.at[index, "PicURL Export Status"] = (
+                f"blocked: rejected {rejected_count} off-listing images"
+                if rejected_count
+                else "skipped: no image URL available"
+            )
 
     return result
 
@@ -1660,6 +1736,7 @@ def diagnose_processed_row(row: pd.Series) -> dict[str, str]:
     billable_weight = get_row_value(row, "Billable Weight kg")
     shipping_usd = get_row_value(row, "FICP Shipping USD")
     image_url = get_row_value(row, "Main Image URL")
+    image_validation_status = get_row_value(row, "Image URL Validation Status")
     ai_status = redact_sensitive_text(get_row_value(row, "AI Enrichment Status"))
     ai_status_lower = ai_status.lower()
     core_pricing_ready = bool(book_count and billable_weight and shipping_usd)
@@ -1710,6 +1787,10 @@ def diagnose_processed_row(row: pd.Series) -> dict[str, str]:
 
     if not image_url:
         review_reasons.append("画像未取得")
+    if image_validation_status:
+        details.append(f"画像検証: {image_validation_status}")
+        if image_validation_status.lower().startswith("blocked:"):
+            review_reasons.append("同一商品の画像を確認できません")
 
     if ai_status and re.search(r"error|parse error|missing api key", ai_status_lower):
         details.append(f"AI補完は任意処理のため未反映: {ai_status}")
@@ -2731,7 +2812,7 @@ def parse_mercari_rendered_listing(
     )
     details_parts = [part for part in [description, f"商品の状態 {condition}" if condition else "", item_info] if part]
     status = "ok (browser rendered)" if description or condition or item_info else "browser rendered: listing detail not found"
-    merged_image_urls = merge_image_url_values(image_url, list(image_urls or []))
+    merged_image_urls = filter_listing_image_urls(url, image_url, list(image_urls or []))
     return ListingData(
         title=title[:300],
         price=clean_text(price)[:80],
@@ -2818,10 +2899,16 @@ class BrowserListingScraper:
                 listing.price = clean_text(meta_values.get("price", ""))[:80]
             if (not listing.price or not listing.image_url or len(listing.image_urls) <= 1) and BeautifulSoup is not None:
                 html = self._page.content()
-                static_payload = extract_listing_payload(BeautifulSoup(html, "lxml"), html)
+                static_payload = extract_listing_payload(BeautifulSoup(html, "lxml"), html, source_url=url)
                 listing.price = first_nonblank(listing.price, static_payload.price)
-                listing.image_url = first_nonblank(listing.image_url, static_payload.image_url)
-                listing.image_urls = merge_image_url_values(listing.image_urls, static_payload.image_urls, listing.image_url)
+                listing.image_urls = filter_listing_image_urls(
+                    url,
+                    listing.image_urls,
+                    static_payload.image_urls,
+                    listing.image_url,
+                    static_payload.image_url,
+                )
+                listing.image_url = first_nonblank(*listing.image_urls)
             return listing
         except Exception as error:
             return ListingData(source_url=url, status=f"browser fetch failed: {error}")
@@ -2894,13 +2981,13 @@ def scrape_listing(
         return ListingData(source_url=url, status=status)
 
     soup = BeautifulSoup(response.text, "lxml")
-    payload = extract_listing_payload(soup, response.text)
+    payload = extract_listing_payload(soup, response.text, source_url=url)
     payload.source_url = url
     payload.status = "ok" if not browser_status else f"ok; {browser_status}"
     return payload
 
 
-def extract_listing_payload(soup, html: str) -> ListingData:
+def extract_listing_payload(soup, html: str, source_url: str = "") -> ListingData:
     title = first_nonblank(
         meta_content(soup, "property", "og:title"),
         meta_content(soup, "name", "twitter:title"),
@@ -2915,7 +3002,7 @@ def extract_listing_payload(soup, html: str) -> ListingData:
         meta_content(soup, "property", "og:image"),
         meta_content(soup, "name", "twitter:image"),
     )
-    image_urls = collect_soup_image_urls(soup, html, primary_image_url=image_url)
+    image_urls = collect_soup_image_urls(soup, html, primary_image_url=image_url, source_url=source_url)
     price = first_nonblank(
         meta_content(soup, "property", "product:price:amount"),
         meta_content(soup, "property", "product:price"),
@@ -2925,7 +3012,14 @@ def extract_listing_payload(soup, html: str) -> ListingData:
     title = first_nonblank(json_ld.get("title"), title)
     description = first_nonblank(json_ld.get("description"), description)
     image_url = first_nonblank(json_ld.get("image_url"), image_url)
-    image_urls = merge_image_url_values(image_url, image_urls, json_ld.get("image_urls", []))
+    image_urls = filter_listing_image_urls(
+        source_url,
+        image_url,
+        image_urls,
+        json_ld.get("image_urls", []),
+    )
+    if re.search(r"mercari\.com|mercdn\.net", source_url, flags=re.I) and extract_mercari_item_id(source_url):
+        image_url = first_nonblank(*image_urls)
     price = first_nonblank(json_ld.get("price"), price, regex_first(html, r'"price"\s*:\s*"?([0-9,]+)"?'))
 
     for tag in soup(["script", "style", "noscript"]):
@@ -2939,10 +3033,16 @@ def extract_listing_payload(soup, html: str) -> ListingData:
         image_urls=image_urls,
         description=clean_text(description)[:1800],
         details_text=visible_text[:5000],
+        source_url=source_url,
     )
 
 
-def collect_soup_image_urls(soup, html: str, primary_image_url: str = "") -> list[str]:
+def collect_soup_image_urls(
+    soup,
+    html: str,
+    primary_image_url: str = "",
+    source_url: str = "",
+) -> list[str]:
     candidates: list[object] = [primary_image_url]
     for attr, value in [
         ("property", "og:image"),
@@ -2959,7 +3059,7 @@ def collect_soup_image_urls(soup, html: str, primary_image_url: str = "") -> lis
         for attr in ("src", "currentSrc", "data-src", "data-original", "data-lazy-src", "srcset", "data-srcset"):
             candidates.append(tag.get(attr, ""))
     candidates.append(html)
-    return merge_image_url_values(candidates)
+    return filter_listing_image_urls(source_url, candidates)
 
 
 def meta_content(soup, attr: str, value: str) -> str:
@@ -5288,6 +5388,8 @@ def process_dataframe(
         "Source Listing Description",
         "Source Listing Detail Preview",
         "Source Image URLs",
+        "Rejected Source Image URL Count",
+        "Image URL Validation Status",
         "Detected Book Count",
         "Book Count Evidence",
         "Book Count Status",
@@ -5369,6 +5471,7 @@ def process_dataframe(
                 source_url
                 and config.url_col
                 and config.url_col in row.index
+                and config.url_col != config.image_col
                 and (is_blank(row.get(config.url_col, "")) or is_likely_image_url(row.get(config.url_col, "")))
             ):
                 row[config.url_col] = source_url
@@ -5380,14 +5483,34 @@ def process_dataframe(
             )
             csv_title = get_row_value(row, config.title_col)
             csv_description = get_row_value(row, config.description_col)
-            csv_image = first_nonblank(*csv_image_urls)
             csv_price = get_row_value(row, config.price_col)
 
             title = first_nonblank(listing.title, csv_title)
             description = first_nonblank(listing.description, csv_description)
-            source_image_urls = merge_image_url_values(csv_image_urls, listing.image_url, listing.image_urls)
+            scraped_image_candidates = merge_image_url_values(listing.image_url, listing.image_urls)
+            validated_scraped_image_urls = filter_listing_image_urls(
+                source_url,
+                scraped_image_candidates,
+            )
+            all_image_candidates = merge_image_url_values(csv_image_urls, scraped_image_candidates)
+            source_image_urls = filter_listing_image_urls(
+                source_url,
+                csv_image_urls,
+                validated_scraped_image_urls,
+            )
+            rejected_image_count = max(0, len(all_image_candidates) - len(source_image_urls))
             row["Source Image URLs"] = "|".join(source_image_urls)
-            image_url = first_nonblank(listing.image_url, *source_image_urls, csv_image)
+            row["Rejected Source Image URL Count"] = str(rejected_image_count)
+            if source_image_urls:
+                row["Image URL Validation Status"] = (
+                    f"ok: {len(source_image_urls)} same-listing images; "
+                    f"rejected {rejected_image_count} off-listing images"
+                )
+            else:
+                row["Image URL Validation Status"] = (
+                    f"blocked: no same-listing image; rejected {rejected_image_count} candidates"
+                )
+            image_url = first_nonblank(*source_image_urls)
             price = first_nonblank(listing.price, csv_price)
             combined_text = "\n".join(
                 str(part)
@@ -5927,7 +6050,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     if using_cached_upload:
         st.caption(f"前回読み込んだCSVを保持しています: {uploaded_name}")
 
-    file_key = f"{uploaded_name}:{hashlib.sha256(raw).hexdigest()}"
+    file_key = f"{PROCESSING_LOGIC_VERSION}:{uploaded_name}:{hashlib.sha256(raw).hexdigest()}"
     frame, encoding = read_csv_bytes(raw)
     headers = list(frame.columns)
     guessed = guess_columns(headers)

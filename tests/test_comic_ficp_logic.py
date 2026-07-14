@@ -63,8 +63,10 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     estimate_book_weight_g,
     estimate_packaging_weight_kg,
     extract_json_object,
+    extract_listing_payload,
     extract_buyer_relevant_listing_details,
     fetch_usd_jpy_exchange_rate,
+    filter_listing_image_urls,
     get_uploaded_or_cached_csv,
     guess_columns,
     infer_mercari_url_from_image_url,
@@ -87,6 +89,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     save_processed_dataframe_cache,
     save_uploaded_csv_cache,
     translate_description_added_text_to_japanese,
+    BeautifulSoup,
 )
 
 
@@ -782,6 +785,76 @@ class ComicFicpLogicTest(unittest.TestCase):
         inferred = infer_mercari_url_from_image_url("https://example.com/images/no-item-id.jpg")
         self.assertEqual(inferred.url, "")
         self.assertEqual(inferred.confidence, "none")
+
+    def test_filter_listing_image_urls_keeps_only_current_mercari_item_photos(self):
+        source_url = "https://jp.mercari.com/item/m12345678901"
+        urls = filter_listing_image_urls(
+            source_url,
+            [
+                "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?111",
+                "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?111",
+                "https://static.mercdn.net/thumb/item/webp/m99999999999_1.jpg?222",
+                "https://static.mercdn.net/item/detail/orig/photos/m99999999999_1.jpg?222",
+                "https://static.mercdn.net/thumb/members/webp/123456789.jpg?333",
+                "https://assets.eisa.mercari.com/cdn-cgi/image/quality=85/site-asset.jpg",
+                "https://a.imgvc.com/i/bf.png?v=1",
+            ],
+        )
+
+        self.assertEqual(
+            urls,
+            [
+                "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?111",
+                "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?111",
+            ],
+        )
+
+    def test_filter_listing_image_urls_keeps_generic_non_mercari_images(self):
+        urls = filter_listing_image_urls(
+            "https://example.com/products/123",
+            "https://images.example.com/products/123-1.jpg|https://images.example.com/products/123-2.jpg",
+        )
+        self.assertEqual(len(urls), 2)
+
+    def test_rendered_listing_rejects_related_product_and_site_images(self):
+        own_1 = "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?111"
+        own_2 = "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?111"
+        listing = parse_mercari_rendered_listing(
+            url="https://jp.mercari.com/item/m12345678901",
+            page_title="Sample Manga Set - メルカリ",
+            body_text="商品の説明\n全12巻セット\n商品の情報\n本・雑誌・漫画\n出品者",
+            image_url=own_1,
+            image_urls=[
+                own_1,
+                own_2,
+                "https://static.mercdn.net/thumb/item/webp/m99999999999_1.jpg?222",
+                "https://static.mercdn.net/thumb/members/webp/123456789.jpg?333",
+                "https://a.imgvc.com/i/bf.png?v=1",
+            ],
+        )
+
+        self.assertEqual(listing.image_url, own_1)
+        self.assertEqual(listing.image_urls, [own_1, own_2])
+
+    @unittest.skipIf(BeautifulSoup is None, "beautifulsoup4 is not installed")
+    def test_static_listing_payload_rejects_related_product_images(self):
+        own_1 = "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?111"
+        own_2 = "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?111"
+        html = f"""
+        <html><head><meta property="og:image" content="{own_1}"></head><body>
+          <img src="{own_2}">
+          <img src="https://static.mercdn.net/thumb/item/webp/m99999999999_1.jpg?222">
+          <img src="https://static.mercdn.net/thumb/members/webp/123456789.jpg?333">
+          <img src="https://a.imgvc.com/i/bf.png?v=1">
+        </body></html>
+        """
+        payload = extract_listing_payload(
+            BeautifulSoup(html, "lxml"),
+            html,
+            source_url="https://jp.mercari.com/item/m12345678901",
+        )
+
+        self.assertEqual(payload.image_urls, [own_1, own_2])
 
     def test_build_preview_image_urls_deduplicates_main_and_extra_images(self):
         row = pd.Series(
@@ -2166,10 +2239,14 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertTrue(preview_urls[1].endswith("m12345678901_2.jpg?1782201200"))
 
     def test_process_dataframe_preserves_multiple_scraped_image_urls(self):
+        original_picurl = (
+            "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?1782201200|"
+            "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?1782201200"
+        )
         frame = pd.DataFrame(
             [
                 {
-                    "PicURL": "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?1782201200",
+                    "PicURL": original_picurl,
                     "Title": "Sample Manga Volumes 1-12 Set",
                     "Description": "",
                 }
@@ -2182,6 +2259,11 @@ class ComicFicpLogicTest(unittest.TestCase):
                 "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?1782201200",
                 "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?1782201200",
                 "https://static.mercdn.net/item/detail/orig/photos/m12345678901_3.jpg?1782201200",
+                "https://static.mercdn.net/thumb/item/webp/m99999999999_1.jpg?1782201200",
+                "https://static.mercdn.net/item/detail/orig/photos/m99999999999_1.jpg?1782201200",
+                "https://static.mercdn.net/thumb/members/webp/123456789.jpg?1782201200",
+                "https://assets.eisa.mercari.com/cdn-cgi/image/quality=85/site-asset.jpg",
+                "https://a.imgvc.com/i/bf.png?v=1",
             ],
             description="",
             details_text="",
@@ -2203,12 +2285,48 @@ class ComicFicpLogicTest(unittest.TestCase):
 
         self.assertIn("m12345678901_2.jpg", result.loc[0, "Source Image URLs"])
         self.assertIn("m12345678901_3.jpg", result.loc[0, "Source Image URLs"])
+        self.assertNotIn("m99999999999", result.loc[0, "Source Image URLs"])
+        self.assertNotIn("thumb/members", result.loc[0, "Source Image URLs"])
+        self.assertEqual(result.loc[0, "Rejected Source Image URL Count"], "5")
+        self.assertEqual(result.loc[0, "PicURL"], original_picurl)
         preview_urls = build_preview_image_urls(result.loc[0], "PicURL")
         self.assertEqual(len(preview_urls), 3)
 
         export = build_export_dataframe(result, FreeShippingRollupOptions(enabled=False))
         self.assertEqual(export.loc[0, "Applied PicURL Image Count"], "3")
         self.assertIn("m12345678901_3.jpg", export.loc[0, "PicURL"])
+        self.assertNotIn("m99999999999", export.loc[0, "PicURL"])
+        self.assertEqual(export.loc[0, "Original PicURL"], original_picurl)
+
+    def test_export_filters_polluted_cached_source_image_urls(self):
+        own_1 = "https://static.mercdn.net/item/detail/orig/photos/m12345678901_1.jpg?111"
+        own_2 = "https://static.mercdn.net/item/detail/orig/photos/m12345678901_2.jpg?111"
+        frame = pd.DataFrame(
+            [
+                {
+                    "PicURL": own_1,
+                    "Main Image URL": own_1,
+                    "Inferred Source URL": "https://jp.mercari.com/item/m12345678901",
+                    "Source Image URLs": "|".join(
+                        [
+                            own_1,
+                            own_2,
+                            "https://static.mercdn.net/thumb/item/webp/m99999999999_1.jpg?222",
+                            "https://static.mercdn.net/item/detail/orig/photos/m99999999999_1.jpg?222",
+                            "https://static.mercdn.net/thumb/members/webp/123456789.jpg?333",
+                            "https://a.imgvc.com/i/bf.png?v=1",
+                        ]
+                    ),
+                }
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(export.loc[0, "PicURL"], f"{own_1}|{own_2}")
+        self.assertEqual(export.loc[0, "Applied PicURL Image Count"], "2")
+        self.assertEqual(export.loc[0, "Rejected PicURL Image Count"], "4")
+        self.assertIn("rejected 4 off-listing images", export.loc[0, "PicURL Export Status"])
 
     def test_process_dataframe_keeps_existing_url_before_inferred_url(self):
         frame = pd.DataFrame(
