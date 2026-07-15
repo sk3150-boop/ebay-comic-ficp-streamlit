@@ -5506,6 +5506,8 @@ def html_escape(value: object) -> str:
 DESCRIPTION_MOJIBAKE_SIGNATURES = (
     "陬ｽ",
     "蜩∵",
+    "縺頑",
+    "縺皮炊",
     "驟埼",
     "霑泌",
     "髢｢",
@@ -5514,9 +5516,20 @@ DESCRIPTION_MOJIBAKE_SIGNATURES = (
 )
 
 
+def description_input_text(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
 def unwrap_cdata_sections(value: object) -> str:
     """Remove complete or truncated CDATA wrappers from eBay Description HTML."""
-    text = str(value or "")
+    text = description_input_text(value)
     previous = None
     while previous != text:
         previous = text
@@ -5528,7 +5541,7 @@ def unwrap_cdata_sections(value: object) -> str:
 
 def contains_description_mojibake(value: object) -> bool:
     """Detect high-confidence UTF-8/CP932 mojibake without flagging normal Japanese."""
-    text = str(value or "")
+    text = description_input_text(value)
     if not text:
         return False
     if "\ufffd" in text or any("\x80" <= char <= "\x9f" for char in text):
@@ -5537,9 +5550,7 @@ def contains_description_mojibake(value: object) -> bool:
         return True
     if any(signature in text for signature in DESCRIPTION_MOJIBAKE_SIGNATURES):
         return True
-    cluster_count = sum(text.count(token) for token in ("縺", "繧", "繝"))
-    halfwidth_katakana_count = len(re.findall(r"[\uff61-\uff9f]", text))
-    return cluster_count >= 2 or (cluster_count >= 1 and halfwidth_katakana_count >= 1)
+    return bool(re.search(r"(?:[縺繧繝][\uff61-\uff9f]|[\uff61-\uff9f][縺繧繝])", text))
 
 
 def remove_corrupt_description_text_node(text_node: object) -> None:
@@ -5589,7 +5600,7 @@ def append_description(existing_description: str, addition: str) -> str:
         rf"\s*{re.escape(AUTOFILL_MARKER_START)}.*?{re.escape(AUTOFILL_MARKER_END)}",
         flags=re.S,
     )
-    cleaned = sanitize_description_html(pattern.sub("", str(existing_description or ""))).rstrip()
+    cleaned = sanitize_description_html(pattern.sub("", description_input_text(existing_description))).rstrip()
     addition = str(addition or "").strip()
     if not addition:
         return cleaned.strip()

@@ -1281,7 +1281,7 @@ with download_slot.container():
         source = (
             "<![CDATA[<div><h2>商品説明</h2>"
             "<p>全6巻セット。日本限定版・講談社です。</p>"
-            "<p>糸に縺れがあります。</p>"
+            "<p>糸が縺れ、紐も縺れています。ﾏﾝｶﾞ本体は良好です。</p>"
             "<p>Authentic Japanese manga.</p></div>]]>"
         )
 
@@ -1290,7 +1290,7 @@ with download_slot.container():
 
         self.assertIn("商品説明", visible_text)
         self.assertIn("全6巻セット。日本限定版・講談社です。", visible_text)
-        self.assertIn("糸に縺れがあります。", visible_text)
+        self.assertIn("糸が縺れ、紐も縺れています。ﾏﾝｶﾞ本体は良好です。", visible_text)
         self.assertIn("Authentic Japanese manga.", visible_text)
         self.assertNotIn("<![CDATA[", result)
         self.assertNotIn("]]>", result)
@@ -1304,6 +1304,21 @@ with download_slot.container():
         self.assertEqual(second, first)
         self.assertIn("Please review the photos carefully.", second)
         self.assertNotIn("笆ｺ", second)
+
+    def test_description_cleanup_treats_missing_values_as_empty(self):
+        self.assertEqual(sanitize_description_html(float("nan")), "")
+        self.assertEqual(sanitize_description_html(pd.NA), "")
+
+        frame = pd.DataFrame(
+            [
+                {"Title": "NaN description", "Description": float("nan")},
+                {"Title": "NA description", "Description": pd.NA},
+            ],
+            dtype=object,
+        )
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(export["Description"].tolist(), ["", ""])
 
     def test_build_export_dataframe_sanitizes_description_as_final_guard(self):
         frame = pd.DataFrame(
