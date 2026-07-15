@@ -6471,6 +6471,41 @@ def render_upload_empty_state(st) -> None:
     )
 
 
+def render_priority_download_panel(
+    st,
+    export_frame: pd.DataFrame,
+    export_csv_bytes: bytes,
+    output_name: str,
+    excluded_count: int,
+) -> None:
+    with st.container(border=True):
+        st.markdown(
+            f"""
+            <div class="priority-download-card">
+              <div class="priority-download-icon" aria-hidden="true">CSV</div>
+              <div>
+                <span>処理が完了しました</span>
+                <h2>eBay用CSVを保存できます</h2>
+                <p>出力対象 {len(export_frame):,}件。元CSVとは別ファイルとして保存されます。</p>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if excluded_count:
+            st.warning(f"要確認・出力除外の合計 {excluded_count:,}件は、保存するCSVから自動で外れます。")
+        st.download_button(
+            "eBay用CSVを今すぐ保存する",
+            data=export_csv_bytes,
+            file_name=output_name,
+            mime="text/csv",
+            type="primary",
+            icon=":material/download:",
+            key="comic_ficp_download_top",
+            use_container_width=True,
+        )
+
+
 def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     st = load_streamlit()
     st.set_page_config(
@@ -6484,6 +6519,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     workflow_slot = st.empty()
     workflow_slot.markdown(build_workflow_steps_html(1), unsafe_allow_html=True)
     render_public_login_gate(st)
+    priority_download_slot = st.empty()
 
     render_section_heading(st, "STEP 1", "CSVを読み込む", "DeepBayから抽出した元CSVを選択してください。")
     with st.container(border=True):
@@ -7053,6 +7089,20 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     ui_summary = summarize_ui_rows(active_frame)
     all_rows_processed = bool(ui_summary["total"]) and ui_summary["remaining"] == 0
     output_name = f"ebay-comic-ficp-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    export_csv_bytes = dataframe_to_csv_bytes(export_frame)
+    if all_rows_processed and not export_frame.empty:
+        with priority_download_slot.container():
+            render_priority_download_panel(
+                st,
+                export_frame,
+                export_csv_bytes,
+                output_name,
+                excluded_count,
+            )
+    elif all_rows_processed:
+        with priority_download_slot.container():
+            with st.container(border=True):
+                st.warning("保存できる商品が0件です。要確認・出力除外の商品と理由を確認してください。")
     with download_slot:
         render_section_heading(st, "STEP 5", "CSVを保存", "全件処理が終わると、安全確認済みのCSVを保存できます。")
         if excluded_count:
@@ -7067,12 +7117,13 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             sum_col3.metric("平均転嫁送料", rollup_summary["average_transfer_usd"])
         st.download_button(
             "eBay用CSVをダウンロード",
-            data=dataframe_to_csv_bytes(export_frame),
+            data=export_csv_bytes,
             file_name=output_name,
             mime="text/csv",
             type="primary" if all_rows_processed and not export_frame.empty else "secondary",
             icon=":material/download:",
             disabled=not all_rows_processed or export_frame.empty,
+            key="comic_ficp_download_step5",
             use_container_width=True,
         )
         if all_rows_processed:
@@ -7471,6 +7522,29 @@ def render_global_styles(st) -> None:
         .status-item.status-excluded::before { background: #ef4444; }
         .status-progress { height: 4px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
         .status-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4f46e5, #14b8a6); }
+        .priority-download-card {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 3px 2px 10px;
+        }
+        .priority-download-icon {
+            flex: 0 0 58px;
+            width: 58px;
+            height: 58px;
+            display: grid;
+            place-items: center;
+            border-radius: 16px;
+            background: linear-gradient(145deg, #0f766e, #0d9488);
+            color: #ffffff !important;
+            font-size: 13px;
+            font-weight: 900;
+            letter-spacing: .08em;
+            box-shadow: 0 12px 24px rgba(15, 118, 110, .20);
+        }
+        .priority-download-card span { color: #0f766e !important; font-size: 11px; font-weight: 850; letter-spacing: .06em; }
+        .priority-download-card h2 { margin: 2px 0 3px; font-size: clamp(20px, 2.2vw, 27px); }
+        .priority-download-card p { margin: 0; color: #64748b !important; font-size: 12px; }
         .api-cost-card {
             position: relative;
             margin: 10px 0 4px;
@@ -8078,6 +8152,7 @@ def render_global_styles(st) -> None:
             .login-heading { margin-top: 22px; }
             .login-feature-card { padding: 22px; }
             .section-heading { margin-top: 18px; }
+            .priority-download-card { align-items: flex-start; }
         }
         @media (max-width: 430px) {
             .app-hero { padding: 25px 20px; }
