@@ -7103,7 +7103,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         with priority_download_slot.container():
             with st.container(border=True):
                 st.warning("保存できる商品が0件です。要確認・出力除外の商品と理由を確認してください。")
-    with download_slot:
+    with download_slot.container():
         render_section_heading(st, "STEP 5", "CSVを保存", "全件処理が終わると、安全確認済みのCSVを保存できます。")
         if excluded_count:
             st.warning(f"要確認・出力除外の合計 {excluded_count}件は、ダウンロードCSVから自動で外れます。")

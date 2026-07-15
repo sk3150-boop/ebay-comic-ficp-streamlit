@@ -157,6 +157,27 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertIn('key="comic_ficp_download_step5"', source)
         self.assertIn("if all_rows_processed and not export_frame.empty:", source)
         self.assertIn("保存できる商品が0件です。", source)
+        self.assertIn("with download_slot.container():", source)
+        self.assertNotIn("with download_slot:\n", source)
+
+    def test_download_slot_container_keeps_heading_button_and_caption(self):
+        from streamlit.testing.v1 import AppTest
+
+        script = '''
+import streamlit as st
+
+download_slot = st.empty()
+with download_slot.container():
+    st.markdown("STEP 5")
+    st.download_button("Download CSV", data=b"Title\\nA\\n", file_name="out.csv")
+    st.caption("export ready")
+'''
+        app = AppTest.from_string(script, default_timeout=30).run()
+
+        self.assertEqual(0, len(app.exception))
+        self.assertEqual(1, len(app.get("download_button")))
+        self.assertIn("STEP 5", [item.value for item in app.markdown])
+        self.assertIn("export ready", [item.value for item in app.caption])
 
     def test_ui_row_summary_separates_ready_review_excluded_and_unprocessed(self):
         frame = pd.DataFrame(
