@@ -61,6 +61,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     contains_japanese_text,
     delete_saved_api_key,
     default_ai_model_for_provider,
+    decide_manga_export_condition,
     delete_public_saved_api_key,
     diagnose_processed_row,
     detect_book_count,
@@ -75,6 +76,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     extract_json_object,
     extract_listing_payload,
     extract_buyer_relevant_listing_details,
+    extract_mercari_condition_from_rendered_text,
     fetch_usd_jpy_exchange_rate,
     filter_listing_image_urls,
     format_ui_duration,
@@ -517,23 +519,78 @@ with download_slot.container():
         self.assertEqual(export.loc[0, "ShippingProfileName"], "200-300 eBay SpeedPAK Economy US")
         self.assertNotIn("Free Shipping Rollup Status", export.columns)
 
-    def test_build_export_dataframe_sets_condition_id_to_very_good(self):
+    def test_build_export_dataframe_maps_structured_source_condition(self):
         frame = pd.DataFrame(
             [
                 {
+                    "Category": "259109",
+                    "ConditionID": "3000",
+                    "Source Listing Condition": "新品、未使用",
+                    "Title": "Brand-new manga set",
+                },
+                {
+                    "Category": "259109",
+                    "ConditionID": "3000",
+                    "Source Listing Condition": "未使用に近い",
+                    "Title": "Like-new manga",
+                },
+                {
                     "Category": "259111",
                     "ConditionID": "3000",
-                    "Title": "Manga set",
+                    "Source Listing Condition": "やや傷や汚れあり",
+                    "Title": "Used manga",
+                },
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(export.loc[0, "ConditionID"], "1000")
+        self.assertEqual(export.loc[0, "Original ConditionID"], "3000")
+        self.assertEqual(export.loc[0, "Applied ConditionID"], "1000")
+        self.assertEqual(export.loc[0, "Applied Condition Name"], "Brand New")
+        self.assertIn("新品、未使用", export.loc[0, "ConditionID Fix Status"])
+        self.assertEqual(export.loc[1, "ConditionID"], "2750")
+        self.assertEqual(export.loc[1, "Applied Condition Name"], "Like New")
+        self.assertEqual(export.loc[2, "ConditionID"], "5000")
+        self.assertEqual(export.loc[2, "Applied Condition Name"], "Good")
+
+    def test_build_export_dataframe_maps_all_supported_used_states(self):
+        cases = [
+            ("目立った傷や汚れなし", "4000", "Very Good"),
+            ("傷や汚れあり", "6000", "Acceptable"),
+            ("全体的に状態が悪い", "6000", "Acceptable"),
+        ]
+        for source_condition, expected_id, expected_name in cases:
+            with self.subTest(source_condition=source_condition):
+                frame = pd.DataFrame(
+                    [
+                        {
+                            "Category": "259109",
+                            "ConditionID": "3000",
+                            "Source Listing Condition": source_condition,
+                        }
+                    ]
+                )
+                export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+                self.assertEqual(export.loc[0, "ConditionID"], expected_id)
+                self.assertEqual(export.loc[0, "Applied Condition Name"], expected_name)
+
+    def test_condition_policy_uses_structured_state_not_new_words_in_description(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Category": "259109",
+                    "ConditionID": "3000",
+                    "Source Listing Condition": "目立った傷や汚れなし",
+                    "Source Listing Description": "新刊5巻です。届いたばかりです。",
+                    "AI Description Notes": "Set is new and unused.",
                 },
                 {
                     "Category": "259109",
                     "ConditionID": "1000",
-                    "Title": "Single volume manga",
-                },
-                {
-                    "Category": "12345",
-                    "ConditionID": "4000",
-                    "Title": "Other category",
+                    "Source Listing Description": "新品で購入した中古本です。",
+                    "AI Description Notes": "Brand new.",
                 },
             ]
         )
@@ -541,14 +598,74 @@ with download_slot.container():
         export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
 
         self.assertEqual(export.loc[0, "ConditionID"], "4000")
-        self.assertEqual(export.loc[0, "Original ConditionID"], "3000")
-        self.assertEqual(export.loc[0, "Applied ConditionID"], "4000")
-        self.assertIn("Very Good", export.loc[0, "ConditionID Fix Status"])
         self.assertEqual(export.loc[1, "ConditionID"], "4000")
-        self.assertEqual(export.loc[1, "Original ConditionID"], "1000")
-        self.assertIn("Very Good", export.loc[1, "ConditionID Fix Status"])
-        self.assertEqual(export.loc[2, "ConditionID"], "4000")
-        self.assertEqual(export.loc[2, "ConditionID Fix Status"], "kept: Very Good")
+        self.assertIn("source condition unavailable", export.loc[1, "Source Condition Mapping Status"])
+
+    def test_condition_policy_blocks_brand_new_when_source_details_show_use(self):
+        decision = decide_manga_export_condition(
+            category="259109",
+            source_condition="新品、未使用",
+            description="新品で購入後、一読しました。",
+        )
+
+        self.assertEqual(decision.condition_id, "4000")
+        self.assertEqual(decision.condition_name, "Very Good")
+        self.assertIn("safety override", decision.status)
+
+    def test_condition_policy_does_not_downgrade_negated_damage_or_use(self):
+        negative_descriptions = [
+            "書き込みはありません。汚れはありません。",
+            "折れ、欠品、日焼け、破れはありません。",
+            "一読もしていません。",
+            "開封済みではありません。",
+            "No scratches, stains, damage, wear, yellowing, or missing pages.",
+            "Not opened and never read.",
+        ]
+        for description in negative_descriptions:
+            with self.subTest(description=description):
+                decision = decide_manga_export_condition(
+                    category="259109",
+                    source_condition="新品、未使用",
+                    description=description,
+                )
+                self.assertEqual(decision.condition_id, "1000")
+                self.assertEqual(decision.condition_name, "Brand New")
+
+    def test_condition_policy_only_maps_verified_manga_categories(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Category": "12345",
+                    "ConditionID": "1000",
+                    "Source Listing Condition": "新品、未使用",
+                }
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(export.loc[0, "ConditionID"], "4000")
+        self.assertIn("outside verified manga", export.loc[0, "Source Condition Mapping Status"])
+
+    def test_export_condition_policy_is_idempotent(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Category": "259109",
+                    "ConditionID": "3000",
+                    "Source Listing Condition": "新品、未使用",
+                }
+            ]
+        )
+
+        first = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+        second = build_export_dataframe(first, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(first.loc[0, "ConditionID"], "1000")
+        self.assertEqual(second.loc[0, "ConditionID"], "1000")
+        self.assertEqual(first.loc[0, "Original ConditionID"], "3000")
+        self.assertEqual(second.loc[0, "Original ConditionID"], "3000")
+        self.assertEqual(first.loc[0, "ConditionID Fix Status"], second.loc[0, "ConditionID Fix Status"])
 
     def test_build_export_dataframe_adds_condition_id_when_missing(self):
         frame = pd.DataFrame([{"Title": "Manga set"}])
@@ -743,6 +860,68 @@ with download_slot.container():
         self.assertIn("Titleが80文字超過", table.loc[1, "Issues"])
         self.assertIn("Specifics 65文字超過", table.loc[1, "Issues"])
         self.assertEqual(table.iloc[-1]["Status"], "除外済み")
+
+    def test_ebay_preflight_accepts_mapped_manga_condition_ids(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Title": f"Manga {index}",
+                    "PicURL": (
+                        "https://static.mercdn.net/item/detail/orig/photos/m111_1.jpg|"
+                        "https://static.mercdn.net/item/detail/orig/photos/m111_2.jpg"
+                    ),
+                    "Category": "259109",
+                    "ConditionID": "3000",
+                    "Source Listing Condition": source_condition,
+                    "StartPrice": "50.00",
+                    "ShippingProfileName": "Free Shipping Policy Fedex",
+                    "Description": "desc",
+                }
+                for index, source_condition in enumerate(
+                    [
+                        "新品、未使用",
+                        "未使用に近い",
+                        "目立った傷や汚れなし",
+                        "やや傷や汚れあり",
+                        "傷や汚れあり",
+                    ],
+                    start=1,
+                )
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+        table = build_ebay_preflight_table(frame, export, "Title")
+
+        self.assertEqual(export["ConditionID"].tolist(), ["1000", "2750", "4000", "5000", "6000"])
+        self.assertTrue((table["Issues"] == "-").all())
+        self.assertEqual(table["Condition"].tolist(), ["Brand New", "Like New", "Very Good", "Good", "Acceptable"])
+
+    def test_ebay_preflight_warns_for_poor_source_condition(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Title": "Worn Manga Volumes 1-2 Set",
+                    "PicURL": (
+                        "https://static.mercdn.net/item/detail/orig/photos/m111_1.jpg|"
+                        "https://static.mercdn.net/item/detail/orig/photos/m111_2.jpg"
+                    ),
+                    "Category": "259109",
+                    "ConditionID": "3000",
+                    "Source Listing Condition": "全体的に状態が悪い",
+                    "StartPrice": "20.00",
+                    "ShippingProfileName": "Free Shipping Policy Fedex",
+                    "Description": "desc",
+                }
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+        table = build_ebay_preflight_table(frame, export, "Title")
+
+        self.assertEqual(export.loc[0, "ConditionID"], "6000")
+        self.assertEqual(table.loc[0, "Status"], "注意")
+        self.assertIn("欠損ページ", table.loc[0, "Warnings"])
 
     def test_build_export_dataframe_rollup_skips_bad_price_or_missing_shipping(self):
         frame = pd.DataFrame(
@@ -1790,7 +1969,43 @@ with download_slot.container():
         self.assertEqual(listing.price, "4,300")
         self.assertIn("SPY×FAMILYの全巻セット売り", listing.description)
         self.assertNotIn("5日前", listing.description)
+        self.assertEqual(listing.source_condition, "未使用に近い")
         self.assertIn("商品の状態 未使用に近い", listing.details_text)
+
+    def test_extract_mercari_condition_returns_only_canonical_condition(self):
+        rendered_text = """
+        商品の状態
+        新品、未使用
+        新品で購入して保管していました
+        カテゴリー
+        本・雑誌・漫画
+        配送料の負担
+        送料込み
+        """
+
+        self.assertEqual(
+            extract_mercari_condition_from_rendered_text(rendered_text),
+            "新品、未使用",
+        )
+
+    def test_extract_mercari_condition_skips_description_phrase_before_structured_field(self):
+        rendered_text = """
+        商品の説明
+        商品の状態は写真をご確認ください。
+        商品の情報
+        カテゴリー
+        本・雑誌・漫画
+        商品の状態
+        未使用に近い
+        数回使用し、あまり使用感がない
+        配送料の負担
+        送料込み
+        """
+
+        self.assertEqual(
+            extract_mercari_condition_from_rendered_text(rendered_text),
+            "未使用に近い",
+        )
 
     def test_specifics_do_not_override_existing_values(self):
         row = pd.Series({"C:Language": "", "C:Type": "Graphic Novel"})
@@ -1970,6 +2185,86 @@ with download_slot.container():
         self.assertEqual(result.loc[0, "PicURL"], listing.image_url)
         self.assertEqual(result.loc[0, "Main Image URL"], listing.image_url)
         self.assertTrue(is_likely_image_url(result.loc[0, "PicURL"]))
+
+    def test_process_dataframe_persists_source_condition_through_export(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "PicURL": "https://jp.mercari.com/item/m12066712737",
+                    "Category": "259109",
+                    "ConditionID": "3000",
+                    "Title": "Sample Manga Volumes 1-5 Set",
+                    "Description": "Existing description",
+                }
+            ]
+        )
+        config = ProcessingConfig(
+            url_col="PicURL",
+            image_col="PicURL",
+            title_col="Title",
+            description_col="Description",
+            exchange_rate_jpy_per_usd=150,
+            enable_scrape=True,
+        )
+        listing = ListingData(
+            title="Sample Manga Volumes 1-5 Set",
+            price="1200",
+            image_url="https://static.mercdn.net/item/detail/orig/photos/m12066712737_1.jpg",
+            description="全5巻セットです。購入後一度も読んでいません。",
+            source_condition="新品、未使用",
+            status="ok",
+            source_url="https://jp.mercari.com/item/m12066712737",
+        )
+
+        with patch("comic_ficp_streamlit_app.scrape_listing", return_value=listing):
+            processed = process_dataframe(frame, config)
+        export = build_export_dataframe(processed, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(processed.loc[0, "Source Listing Condition"], "新品、未使用")
+        self.assertEqual(processed.loc[0, "Source ConditionID Decision"], "1000")
+        self.assertEqual(processed.loc[0, "ConditionID"], "1000")
+        self.assertEqual(export.loc[0, "ConditionID"], "1000")
+        self.assertEqual(export.loc[0, "Original ConditionID"], "3000")
+        self.assertEqual(export.loc[0, "Applied Condition Name"], "Brand New")
+
+    def test_process_dataframe_preserves_captured_condition_when_scrape_is_disabled(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Category": "259109",
+                    "ConditionID": "1000",
+                    "PicURL": (
+                        "https://static.mercdn.net/item/detail/orig/photos/m12066712737_1.jpg|"
+                        "https://static.mercdn.net/item/detail/orig/photos/m12066712737_2.jpg"
+                    ),
+                    "Title": "Saved Manga Volumes 1-5 Set",
+                    "Description": "Existing description",
+                    "Source Listing Title": "保存済み漫画 全5巻",
+                    "Source Listing Description": "未読のまま保管しています。",
+                    "Source Listing Condition": "新品、未使用",
+                    "Source ConditionID Decision": "1000",
+                    "Source Condition Name": "Brand New",
+                    "Source Condition Mapping Status": "mapped: 新品、未使用 -> 1000 (Brand New)",
+                    "Source Condition Evidence": "Structured source listing condition.",
+                }
+            ]
+        )
+        config = ProcessingConfig(
+            url_col="PicURL",
+            image_col="PicURL",
+            title_col="Title",
+            description_col="Description",
+            enable_scrape=False,
+        )
+
+        processed = process_dataframe(frame, config)
+        export = build_export_dataframe(processed, FreeShippingRollupOptions(enabled=False))
+
+        self.assertEqual(processed.loc[0, "Source Listing Condition"], "新品、未使用")
+        self.assertEqual(processed.loc[0, "Source Listing Title"], "保存済み漫画 全5巻")
+        self.assertEqual(processed.loc[0, "Source Listing Description"], "未読のまま保管しています。")
+        self.assertEqual(processed.loc[0, "ConditionID"], "1000")
+        self.assertEqual(export.loc[0, "ConditionID"], "1000")
 
     def test_process_dataframe_uses_ai_enrichment_when_enabled(self):
         frame = pd.DataFrame(

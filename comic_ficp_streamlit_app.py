@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-description-dedupe-v4"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-source-condition-v5"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -371,6 +371,7 @@ class ListingData:
     image_urls: list[str] = field(default_factory=list)
     description: str = ""
     details_text: str = ""
+    source_condition: str = ""
     status: str = "not fetched"
     source_url: str = ""
 
@@ -1571,6 +1572,235 @@ def apply_free_shipping_rollup(
 
 DEFAULT_EXPORT_CONDITION_ID = "4000"
 DEFAULT_EXPORT_CONDITION_NAME = "Very Good"
+MANGA_SOURCE_CONDITION_CATEGORY_IDS = {"259109", "259111"}
+MANGA_EBAY_CONDITION_NAMES = {
+    "1000": "Brand New",
+    "2750": "Like New",
+    "4000": "Very Good",
+    "5000": "Good",
+    "6000": "Acceptable",
+}
+MANGA_SOURCE_CONDITION_MAP = {
+    "新品、未使用": "1000",
+    "未使用に近い": "2750",
+    "目立った傷や汚れなし": "4000",
+    "やや傷や汚れあり": "5000",
+    "傷や汚れあり": "6000",
+    "全体的に状態が悪い": "6000",
+    "Brand New": "1000",
+    "Like New": "2750",
+    "Very Good": "4000",
+    "Good": "5000",
+    "Acceptable": "6000",
+    "Poor": "6000",
+}
+MANGA_CONDITION_CONSERVATISM = {
+    "1000": 0,
+    "2750": 1,
+    "4000": 2,
+    "5000": 3,
+    "6000": 4,
+}
+
+
+@dataclass(frozen=True)
+class ExportConditionDecision:
+    condition_id: str
+    condition_name: str
+    source_condition: str
+    status: str
+    evidence: str
+
+
+def normalize_category_id(value: object) -> str:
+    text = clean_text(value)
+    match = re.fullmatch(r"(\d+)(?:\.0+)?", text)
+    return match.group(1) if match else text
+
+
+def normalize_source_listing_condition(value: object) -> str:
+    if is_blank(value):
+        return ""
+    text = clean_text(value).lstrip(":：").strip()
+    if not text:
+        return ""
+
+    japanese_patterns = [
+        (r"^新品\s*[、,，・/／]?\s*未使用", "新品、未使用"),
+        (r"^(?:新品未使用品?|新品|未使用)$", "新品、未使用"),
+        (r"^未使用に近い", "未使用に近い"),
+        (r"^(?:目立った|目立つ)傷や汚れなし", "目立った傷や汚れなし"),
+        (r"^やや傷や汚れあり", "やや傷や汚れあり"),
+        (r"^傷や汚れあり", "傷や汚れあり"),
+        (r"^全体的に状態が悪い", "全体的に状態が悪い"),
+    ]
+    for pattern, canonical in japanese_patterns:
+        if re.search(pattern, text):
+            return canonical
+
+    english = text.casefold()
+    english_aliases = {
+        "brand new": "Brand New",
+        "new": "Brand New",
+        "new, unused": "Brand New",
+        "new / unused": "Brand New",
+        "new/unused": "Brand New",
+        "unopened": "Brand New",
+        "like new": "Like New",
+        "very good": "Very Good",
+        "good": "Good",
+        "acceptable": "Acceptable",
+        "poor": "Poor",
+    }
+    return english_aliases.get(english, "")
+
+
+def detect_new_condition_safety_override(description: object, details_text: object) -> tuple[str, str]:
+    source = clean_text(f"{description or ''} {details_text or ''}")
+    if not source:
+        return "", ""
+
+    english_damage_token = r"(?:scratches?|stains?|damage|damaged|wear|yellowing|missing pages?|opened|used|read)"
+    source = re.sub(
+        rf"\b(?:no|without)\s+(?:visible\s+)?{english_damage_token}"
+        rf"(?:(?:\s*,\s*(?:(?:or|and)\s+)?|\s+(?:or|and)\s+){english_damage_token})*",
+        " ",
+        source,
+        flags=re.I,
+    )
+    source = re.sub(
+        r"目立(?:った|つ)傷や汚れなし|傷や汚れ(?:は|が)?(?:ありません|ない)|"
+        r"キズ(?:は|が)?(?:ありません|ない)|ヤケ(?:は|が)?(?:ありません|ない)|"
+        r"(?:一読|通読|読了|読んだ|読み終えた|使用済み?|使用感|中古(?:品)?|古本|傷|キズ|汚れ|シミ|破れ|折れ|"
+        r"ヤケ|日焼け|黄ばみ|書き込み|欠品|開封済み?|開封品)"
+        r"(?:こと)?(?:は|が|も)?(?:では)?(?:して)?(?:いません|いない|ありません|ございません|ない|なし)|"
+        r"\b(?:no|not|never)\s+(?:visible\s+)?(?:scratches?|stains?|damage|damaged|wear|"
+        r"yellowing|missing pages?|opened|used|read)\b|"
+        r"\bwithout\s+(?:scratches?|stains?|damage|wear|yellowing|missing pages?)\b",
+        " ",
+        source,
+        flags=re.I,
+    )
+    hard_conflicts = [
+        (r"一読|通読|読了|(?:\d+|数|何)回(?:ほど)?(?:読み|読ん)|読みました|読んだ", "read/use evidence"),
+        (r"中古(?:品)?|古本|使用済み?|使用感(?:が|は)?(?:あり|有)", "used-item evidence"),
+        (
+            r"やや傷や汚れあり|傷や汚れあり|全体的に状態が悪い|"
+            r"(?:傷|キズ|汚れ|シミ|破れ|折れ|ヤケ|日焼け|黄ばみ|書き込み|欠品)"
+            r"(?:が|は)?(?:あり(?!ません)|有り|あります|ございます)",
+            "damage/wear evidence",
+        ),
+        (r"\b(?:read once|read several times|pre[- ]owned|secondhand|used item|previously used)\b", "used-item evidence"),
+        (r"\b(?:scratches?|stains?|yellowing|damaged?|missing pages?)\b", "damage/wear evidence"),
+    ]
+    for pattern, evidence in hard_conflicts:
+        if re.search(pattern, source, flags=re.I):
+            return "4000", evidence
+
+    if re.search(r"開封済み?|開封しました|開封品|\bopened\b", source, flags=re.I):
+        return "2750", "opened-package evidence"
+    return "", ""
+
+
+def decide_manga_export_condition(
+    *,
+    category: object,
+    source_condition: object,
+    description: object = "",
+    details_text: object = "",
+) -> ExportConditionDecision:
+    category_id = normalize_category_id(category)
+    canonical = normalize_source_listing_condition(source_condition)
+    raw_source_condition = "" if is_blank(source_condition) else clean_text(source_condition)
+    fallback = ExportConditionDecision(
+        condition_id=DEFAULT_EXPORT_CONDITION_ID,
+        condition_name=DEFAULT_EXPORT_CONDITION_NAME,
+        source_condition=canonical or raw_source_condition,
+        status="fallback: source condition unavailable; applied Very Good",
+        evidence="No supported structured source condition was available.",
+    )
+    if category_id not in MANGA_SOURCE_CONDITION_CATEGORY_IDS:
+        return ExportConditionDecision(
+            condition_id=fallback.condition_id,
+            condition_name=fallback.condition_name,
+            source_condition=fallback.source_condition,
+            status="fallback: category is outside verified manga condition categories; applied Very Good",
+            evidence=f"Category {category_id or '(blank)'} is not enabled for source-condition mapping.",
+        )
+    if not canonical:
+        if raw_source_condition:
+            return ExportConditionDecision(
+                condition_id=fallback.condition_id,
+                condition_name=fallback.condition_name,
+                source_condition=raw_source_condition,
+                status="fallback: unsupported source condition; applied Very Good",
+                evidence=f"Unrecognized structured source condition: {raw_source_condition}",
+            )
+        return fallback
+
+    condition_id = MANGA_SOURCE_CONDITION_MAP[canonical]
+    condition_name = MANGA_EBAY_CONDITION_NAMES[condition_id]
+    if condition_id == "1000":
+        override_id, override_evidence = detect_new_condition_safety_override(description, details_text)
+        if override_id:
+            override_name = MANGA_EBAY_CONDITION_NAMES[override_id]
+            return ExportConditionDecision(
+                condition_id=override_id,
+                condition_name=override_name,
+                source_condition=canonical,
+                status=f"safety override: source says Brand New; applied {override_name}",
+                evidence=override_evidence,
+            )
+
+    if canonical == "全体的に状態が悪い":
+        return ExportConditionDecision(
+            condition_id=condition_id,
+            condition_name=condition_name,
+            source_condition=canonical,
+            status=f"mapped with review: {canonical} -> {condition_id} ({condition_name})",
+            evidence="Closest supported eBay condition; verify that all pages are intact and readable.",
+        )
+
+    return ExportConditionDecision(
+        condition_id=condition_id,
+        condition_name=condition_name,
+        source_condition=canonical,
+        status=f"mapped: {canonical} -> {condition_id} ({condition_name})",
+        evidence="Structured source listing condition.",
+    )
+
+
+def get_row_export_condition_decision(row: pd.Series) -> ExportConditionDecision:
+    decision = decide_manga_export_condition(
+        category=get_row_value(row, "Category"),
+        source_condition=get_row_value(row, "Source Listing Condition"),
+        description=get_row_value(row, "Source Listing Description"),
+        details_text=get_row_value(row, "Source Listing Detail Preview"),
+    )
+    persisted_id = get_row_value(row, "Source ConditionID Decision")
+    persisted_status = get_row_value(row, "Source Condition Mapping Status")
+    persisted_evidence = get_row_value(row, "Source Condition Evidence")
+    if (
+        decision.source_condition
+        and normalize_category_id(get_row_value(row, "Category")) in MANGA_SOURCE_CONDITION_CATEGORY_IDS
+        and persisted_id in MANGA_EBAY_CONDITION_NAMES
+        and (
+            persisted_id == decision.condition_id
+            or (
+                persisted_status.startswith("safety override:")
+                and MANGA_CONDITION_CONSERVATISM[persisted_id]
+                >= MANGA_CONDITION_CONSERVATISM[decision.condition_id]
+            )
+        )
+    ):
+        return ExportConditionDecision(
+            condition_id=persisted_id,
+            condition_name=MANGA_EBAY_CONDITION_NAMES[persisted_id],
+            source_condition=decision.source_condition,
+            status=persisted_status or decision.status,
+            evidence=persisted_evidence or decision.evidence,
+        )
+    return decision
 
 
 def apply_export_condition_id_policy(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1581,7 +1811,14 @@ def apply_export_condition_id_policy(frame: pd.DataFrame) -> pd.DataFrame:
     audit_columns = [
         "Original ConditionID",
         "Applied ConditionID",
+        "Applied Condition Name",
         "ConditionID Fix Status",
+        "ConditionID Evidence",
+        "Source Listing Condition",
+        "Source ConditionID Decision",
+        "Source Condition Name",
+        "Source Condition Mapping Status",
+        "Source Condition Evidence",
     ]
     for column in audit_columns:
         if column not in result.columns:
@@ -1589,16 +1826,30 @@ def apply_export_condition_id_policy(frame: pd.DataFrame) -> pd.DataFrame:
 
     for index, row in result.iterrows():
         condition_id = str(get_row_value(row, "ConditionID")).strip()
-        result.at[index, "Original ConditionID"] = condition_id
-
-        result.at[index, "ConditionID"] = DEFAULT_EXPORT_CONDITION_ID
-        result.at[index, "Applied ConditionID"] = DEFAULT_EXPORT_CONDITION_ID
-        if condition_id == DEFAULT_EXPORT_CONDITION_ID:
-            result.at[index, "ConditionID Fix Status"] = f"kept: {DEFAULT_EXPORT_CONDITION_NAME}"
+        original_condition_id = get_row_value(row, "Original ConditionID") or condition_id
+        decision = get_row_export_condition_decision(row)
+        result.at[index, "Original ConditionID"] = original_condition_id
+        result.at[index, "ConditionID"] = decision.condition_id
+        result.at[index, "Applied ConditionID"] = decision.condition_id
+        result.at[index, "Applied Condition Name"] = decision.condition_name
+        result.at[index, "ConditionID Evidence"] = decision.evidence
+        result.at[index, "Source Listing Condition"] = decision.source_condition
+        result.at[index, "Source ConditionID Decision"] = decision.condition_id
+        result.at[index, "Source Condition Name"] = decision.condition_name
+        result.at[index, "Source Condition Mapping Status"] = decision.status
+        result.at[index, "Source Condition Evidence"] = decision.evidence
+        if original_condition_id == decision.condition_id:
+            result.at[index, "ConditionID Fix Status"] = (
+                f"kept: {decision.condition_id} ({decision.condition_name}); {decision.status}"
+            )
+        elif original_condition_id:
+            result.at[index, "ConditionID Fix Status"] = (
+                f"fixed: {original_condition_id} -> {decision.condition_id} "
+                f"({decision.condition_name}); {decision.status}"
+            )
         else:
             result.at[index, "ConditionID Fix Status"] = (
-                f"fixed: set ConditionID to {DEFAULT_EXPORT_CONDITION_ID} "
-                f"({DEFAULT_EXPORT_CONDITION_NAME}) per export policy"
+                f"set: {decision.condition_id} ({decision.condition_name}); {decision.status}"
             )
 
     return result
@@ -1767,10 +2018,27 @@ def build_ebay_preflight_table(
 
         category = get_row_value(row, "Category")
         condition_id = get_row_value(row, "ConditionID")
+        condition_name = MANGA_EBAY_CONDITION_NAMES.get(condition_id, "")
         if not category:
             issues.append("Category空欄")
-        if condition_id != DEFAULT_EXPORT_CONDITION_ID:
-            issues.append(f"ConditionIDが{DEFAULT_EXPORT_CONDITION_ID}ではありません")
+        category_id = normalize_category_id(category)
+        allowed_condition_ids = (
+            set(MANGA_EBAY_CONDITION_NAMES)
+            if category_id in MANGA_SOURCE_CONDITION_CATEGORY_IDS
+            else {DEFAULT_EXPORT_CONDITION_ID}
+        )
+        if condition_id not in allowed_condition_ids:
+            issues.append(f"ConditionID {condition_id or '(blank)'} はCategory {category_id or '(blank)'}で未確認です")
+        source_condition = get_row_value(row, "Source Listing Condition")
+        if source_condition:
+            expected_condition = get_row_export_condition_decision(row)
+            if condition_id != expected_condition.condition_id:
+                issues.append(
+                    f"商品元状態との不一致: {condition_id or '(blank)'} -> "
+                    f"{expected_condition.condition_id} ({expected_condition.condition_name})"
+                )
+            if expected_condition.source_condition == "全体的に状態が悪い":
+                warnings.append("元状態が悪いため、欠損ページや読めない損傷がないか要確認")
 
         title_length = len(title)
         if not title:
@@ -1816,6 +2084,8 @@ def build_ebay_preflight_table(
                 "Images": str(image_count),
                 "Category": category or "-",
                 "ConditionID": condition_id or "-",
+                "Condition": condition_name or "-",
+                "Source Condition": source_condition or "-",
                 "StartPrice": start_price or "-",
                 "ShippingProfileName": get_row_value(row, "ShippingProfileName") or "-",
                 "Issues": "; ".join(issues) if issues else "-",
@@ -1836,6 +2106,8 @@ def build_ebay_preflight_table(
                 "Images": "-",
                 "Category": "-",
                 "ConditionID": "-",
+                "Condition": "-",
+                "Source Condition": "-",
                 "StartPrice": "-",
                 "ShippingProfileName": "-",
                 "Issues": "-",
@@ -2953,13 +3225,24 @@ def remove_mercari_relative_date_lines(text: str) -> str:
 
 
 def extract_mercari_condition_from_rendered_text(text: str) -> str:
-    section = extract_section_between_markers(
-        text,
-        "商品の状態",
-        ["配送料の負担", "配送の方法", "発送元の地域", "発送までの日数", "メルカリ安心", "出品者"],
-    )
-    lines = [clean_text(line) for line in section.splitlines() if clean_text(line)]
-    return lines[0] if lines else ""
+    source = str(text or "")
+    starts = [match.start() for match in re.finditer("商品の状態", source)]
+    if not starts:
+        return ""
+    item_info_start = source.rfind("商品の情報")
+    structured_starts = [start for start in starts if item_info_start >= 0 and start >= item_info_start]
+    candidates = structured_starts or starts
+    for marker_start in candidates:
+        start = marker_start + len("商品の状態")
+        end = len(source)
+        for marker in ["配送料の負担", "配送の方法", "発送元の地域", "発送までの日数", "メルカリ安心", "出品者"]:
+            marker_index = source.find(marker, start)
+            if marker_index >= 0:
+                end = min(end, marker_index)
+        condition = normalize_source_listing_condition(source[start:end])
+        if condition:
+            return condition
+    return ""
 
 
 def parse_mercari_rendered_listing(
@@ -2991,6 +3274,7 @@ def parse_mercari_rendered_listing(
         image_urls=merged_image_urls,
         description=description[:1800],
         details_text=clean_text("\n".join(details_parts))[:5000],
+        source_condition=condition,
         status=status,
         source_url=url,
     )
@@ -3195,7 +3479,11 @@ def extract_listing_payload(soup, html: str, source_url: str = "") -> ListingDat
 
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
-    visible_text = clean_text(soup.get_text(" "))
+    raw_visible_text = soup.get_text("\n")
+    visible_text = clean_text(raw_visible_text)
+    source_condition = ""
+    if re.search(r"mercari\.com|mercdn\.net", source_url, flags=re.I):
+        source_condition = extract_mercari_condition_from_rendered_text(raw_visible_text)
 
     return ListingData(
         title=clean_text(title)[:300],
@@ -3204,6 +3492,7 @@ def extract_listing_payload(soup, html: str, source_url: str = "") -> ListingDat
         image_urls=image_urls,
         description=clean_text(description)[:1800],
         details_text=visible_text[:5000],
+        source_condition=source_condition,
         source_url=source_url,
     )
 
@@ -6008,6 +6297,16 @@ def process_dataframe(
         "Source Listing Price",
         "Source Listing Description",
         "Source Listing Detail Preview",
+        "Source Listing Condition",
+        "Source ConditionID Decision",
+        "Source Condition Name",
+        "Source Condition Mapping Status",
+        "Source Condition Evidence",
+        "Original ConditionID",
+        "Applied ConditionID",
+        "Applied Condition Name",
+        "ConditionID Fix Status",
+        "ConditionID Evidence",
         "Source Image URLs",
         "Rejected Source Image URL Count",
         "Image URL Validation Status",
@@ -6136,6 +6435,50 @@ def process_dataframe(
                 )
             image_url = first_nonblank(*source_image_urls)
             price = first_nonblank(listing.price, csv_price)
+            source_listing_title = truncate_text(
+                first_nonblank(listing.title, get_row_value(row, "Source Listing Title")),
+                300,
+            )
+            source_listing_price = truncate_text(
+                first_nonblank(listing.price, get_row_value(row, "Source Listing Price")),
+                80,
+            )
+            source_listing_description = truncate_text(
+                first_nonblank(
+                    clean_source_listing_description(listing.description),
+                    get_row_value(row, "Source Listing Description"),
+                ),
+                700,
+            )
+            source_listing_detail_preview = first_nonblank(
+                build_source_detail_preview(listing.description, listing.details_text),
+                get_row_value(row, "Source Listing Detail Preview"),
+            )
+            source_listing_condition = first_nonblank(
+                listing.source_condition,
+                get_row_value(row, "Source Listing Condition"),
+            )
+            if is_blank(row.get("Original ConditionID", "")):
+                row["Original ConditionID"] = get_row_value(row, "ConditionID")
+            if listing.source_condition:
+                condition_decision = decide_manga_export_condition(
+                    category=get_row_value(row, "Category"),
+                    source_condition=listing.source_condition,
+                    description=listing.description,
+                    details_text=listing.details_text,
+                )
+            else:
+                decision_row = row.copy()
+                decision_row["Source Listing Condition"] = source_listing_condition
+                decision_row["Source Listing Description"] = source_listing_description
+                decision_row["Source Listing Detail Preview"] = source_listing_detail_preview
+                condition_decision = get_row_export_condition_decision(decision_row)
+            row["Source Listing Condition"] = condition_decision.source_condition
+            row["Source ConditionID Decision"] = condition_decision.condition_id
+            row["Source Condition Name"] = condition_decision.condition_name
+            row["Source Condition Mapping Status"] = condition_decision.status
+            row["Source Condition Evidence"] = condition_decision.evidence
+            row["ConditionID"] = condition_decision.condition_id
             combined_text = "\n".join(
                 str(part)
                 for part in [
@@ -6153,10 +6496,10 @@ def process_dataframe(
                 row["Inferred Source URL"] = inferred_source.url
                 row["Source URL Confidence"] = source_confidence
                 row["Source URL Evidence"] = source_evidence
-                row["Source Listing Title"] = truncate_text(listing.title, 300)
-                row["Source Listing Price"] = truncate_text(listing.price, 80)
-                row["Source Listing Description"] = truncate_text(clean_source_listing_description(listing.description), 700)
-                row["Source Listing Detail Preview"] = build_source_detail_preview(listing.description, listing.details_text)
+                row["Source Listing Title"] = source_listing_title
+                row["Source Listing Price"] = source_listing_price
+                row["Source Listing Description"] = source_listing_description
+                row["Source Listing Detail Preview"] = source_listing_detail_preview
                 row["Listing Eligibility"] = "Excluded"
                 row["Exclusion Reason"] = exclusion.reason
                 row["Exclusion Evidence"] = exclusion.evidence
@@ -6248,10 +6591,10 @@ def process_dataframe(
                 row["Inferred Source URL"] = inferred_source.url
                 row["Source URL Confidence"] = source_confidence
                 row["Source URL Evidence"] = source_evidence
-                row["Source Listing Title"] = truncate_text(listing.title, 300)
-                row["Source Listing Price"] = truncate_text(listing.price, 80)
-                row["Source Listing Description"] = truncate_text(clean_source_listing_description(listing.description), 700)
-                row["Source Listing Detail Preview"] = build_source_detail_preview(listing.description, listing.details_text)
+                row["Source Listing Title"] = source_listing_title
+                row["Source Listing Price"] = source_listing_price
+                row["Source Listing Description"] = source_listing_description
+                row["Source Listing Detail Preview"] = source_listing_detail_preview
                 row["Detected Book Count"] = str(book_count or "")
                 row["Book Count Evidence"] = evidence
                 row["Book Count Status"] = book_count_status
@@ -6317,10 +6660,10 @@ def process_dataframe(
                 row["Inferred Source URL"] = inferred_source.url
                 row["Source URL Confidence"] = source_confidence
                 row["Source URL Evidence"] = source_evidence
-                row["Source Listing Title"] = truncate_text(listing.title, 300)
-                row["Source Listing Price"] = truncate_text(listing.price, 80)
-                row["Source Listing Description"] = truncate_text(clean_source_listing_description(listing.description), 700)
-                row["Source Listing Detail Preview"] = build_source_detail_preview(listing.description, listing.details_text)
+                row["Source Listing Title"] = source_listing_title
+                row["Source Listing Price"] = source_listing_price
+                row["Source Listing Description"] = source_listing_description
+                row["Source Listing Detail Preview"] = source_listing_detail_preview
                 row["Detected Book Count"] = str(book_count or "")
                 row["Book Count Evidence"] = evidence
                 row["Book Count Status"] = book_count_status
@@ -6443,10 +6786,10 @@ def process_dataframe(
             row["Inferred Source URL"] = inferred_source.url
             row["Source URL Confidence"] = source_confidence
             row["Source URL Evidence"] = source_evidence
-            row["Source Listing Title"] = truncate_text(listing.title, 300)
-            row["Source Listing Price"] = truncate_text(listing.price, 80)
-            row["Source Listing Description"] = truncate_text(clean_source_listing_description(listing.description), 700)
-            row["Source Listing Detail Preview"] = build_source_detail_preview(listing.description, listing.details_text)
+            row["Source Listing Title"] = source_listing_title
+            row["Source Listing Price"] = source_listing_price
+            row["Source Listing Description"] = source_listing_description
+            row["Source Listing Detail Preview"] = source_listing_detail_preview
             row["Detected Book Count"] = str(book_count or "")
             row["Book Count Evidence"] = evidence
             row["Book Count Status"] = book_count_status
