@@ -966,16 +966,16 @@ with download_slot.container():
             ]
         )
 
-        self.assertEqual(resolve_preflight_selected_position(visible_table, [0]), 0)
-        self.assertEqual(resolve_preflight_selected_position(visible_table, [1]), 2)
+        self.assertEqual(resolve_preflight_selected_position(visible_table, [[0, "Image"]]), 0)
+        self.assertEqual(resolve_preflight_selected_position(visible_table, [[1, "Title"]]), 2)
         self.assertIsNone(resolve_preflight_selected_position(visible_table, []))
-        self.assertIsNone(resolve_preflight_selected_position(visible_table, [2]))
-        self.assertIsNone(resolve_preflight_selected_position(visible_table, ["invalid"]))
+        self.assertIsNone(resolve_preflight_selected_position(visible_table, [[2, "Title"]]))
+        self.assertIsNone(resolve_preflight_selected_position(visible_table, [["invalid", "Title"]]))
 
     def test_preflight_native_selection_rejects_blank_source_position(self):
         table = pd.DataFrame([{"Position": "", "Title": "Summary"}])
 
-        self.assertIsNone(resolve_preflight_selected_position(table, [0]))
+        self.assertIsNone(resolve_preflight_selected_position(table, [[0, "Title"]]))
 
     def test_pending_preflight_selection_opens_selected_product_before_radio_render(self):
         fake_st = FakeStreamlit()
@@ -992,7 +992,7 @@ with download_slot.container():
     def test_preflight_uses_native_selection_and_large_rows_without_query_links(self):
         source = (ROOT / "comic_ficp_streamlit_app.py").read_text(encoding="utf-8")
 
-        self.assertIn('selection_mode="single-row"', source)
+        self.assertIn('selection_mode="single-cell"', source)
         self.assertIn("row_height=REVIEW_TABLE_ROW_HEIGHT_PX", source)
         self.assertIn('"画像（クリックで詳細）"', source)
         self.assertIn('"Title（クリックで商品詳細）"', source)

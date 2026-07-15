@@ -9054,11 +9054,16 @@ def build_select_product_href(position: int) -> str:
     return f"?comic_ficp_select={int(position)}"
 
 
-def resolve_preflight_selected_position(table: pd.DataFrame, selected_rows: object) -> Optional[int]:
-    if not isinstance(selected_rows, (list, tuple)) or not selected_rows:
+def resolve_preflight_selected_position(table: pd.DataFrame, selected_items: object) -> Optional[int]:
+    if not isinstance(selected_items, (list, tuple)) or not selected_items:
         return None
+    first_selection = selected_items[0]
+    if isinstance(first_selection, (list, tuple)):
+        if not first_selection:
+            return None
+        first_selection = first_selection[0]
     try:
-        visible_position = int(selected_rows[0])
+        visible_position = int(first_selection)
     except (TypeError, ValueError):
         return None
     if visible_position < 0 or visible_position >= len(table):
@@ -9100,7 +9105,7 @@ def render_clickable_preflight_table(st, table: pd.DataFrame) -> None:
         height=REVIEW_TABLE_HEIGHT_PX,
         row_height=REVIEW_TABLE_ROW_HEIGHT_PX,
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="single-cell",
         key="comic_ficp_preflight_selector",
         column_config={
             "No": st.column_config.TextColumn("No", width=56),
@@ -9127,10 +9132,10 @@ def render_clickable_preflight_table(st, table: pd.DataFrame) -> None:
         },
     )
     try:
-        selected_rows = selection_event.selection.rows
+        selected_cells = selection_event.selection.cells
     except AttributeError:
-        selected_rows = selection_event.get("selection", {}).get("rows", []) if isinstance(selection_event, dict) else []
-    selected_position = resolve_preflight_selected_position(visible_table, selected_rows)
+        selected_cells = selection_event.get("selection", {}).get("cells", []) if isinstance(selection_event, dict) else []
+    selected_position = resolve_preflight_selected_position(visible_table, selected_cells)
     if selected_position is not None:
         st.session_state[PREFLIGHT_PENDING_SELECTION_KEY] = selected_position
         st.rerun()
