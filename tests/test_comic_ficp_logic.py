@@ -98,6 +98,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     saved_api_key_exists,
     save_processed_dataframe_cache,
     save_uploaded_csv_cache,
+    sanitize_description_html,
     summarize_ui_rows,
     summarize_api_costs,
     translate_description_added_text_to_japanese,
@@ -1235,10 +1236,99 @@ with download_slot.container():
 
         result = append_description(template, addition)
 
-        self.assertTrue(result.startswith("<![CDATA["))
-        self.assertTrue(result.endswith("]]>"))
+        self.assertNotIn("<![CDATA[", result)
+        self.assertNotIn("]]>", result)
         self.assertLess(result.index("Template overview."), result.index(AUTOFILL_MARKER_START))
         self.assertLess(result.index(AUTOFILL_MARKER_START), result.index("Payment Details"))
+
+    def test_description_mojibake_template_is_sanitized_before_append(self):
+        addition = build_description_append(
+            title="",
+            book_count=6,
+            evidence="全6巻",
+            weight_kg=None,
+            ficp_charge=None,
+            shipping_usd=None,
+            source_url="",
+            buyer_detail_notes=[],
+        )
+        template = (
+            "<![CDATA["
+            '<div class="listing-template">'
+            '<div class="section-heading">Product Overview</div>'
+            '<div class="subtitle">(陬ｽ蜩∵ｦりｦ・</div>'
+            '<div class="overview-body"><p>笆ｺ 100% genuine products sourced directly from Japan.</p></div>'
+            '<div class="section-heading">Payment Details</div>'
+            '<div class="subtitle">(縺頑髪謇輔＞縺ｫ縺､縺・※)</div>'
+            '<div>Thank you for your understanding!</div>'
+            '<div>笆ｺ SIGNAL STATUS: ONLINE // END OF TRANSMISSION 笳・/div>'
+            "</div>"
+        )
+
+        result = append_description(template, addition)
+
+        self.assertIn("Product Overview", result)
+        self.assertIn("100% genuine products sourced directly from Japan.", result)
+        self.assertIn("This manga set includes 6 books.", result)
+        self.assertIn("Payment Details", result)
+        self.assertIn("SIGNAL STATUS: ONLINE // END OF TRANSMISSION", result)
+        self.assertEqual(result.count(AUTOFILL_MARKER_START), 1)
+        for corrupt_text in ("<![CDATA[", "]]>", "陬ｽ蜩", "縺頑", "笆ｺ", "笳・", "\uf8f0", "\ufffd"):
+            self.assertNotIn(corrupt_text, result)
+        self.assertIsNone(re.search(r"(?<!<)/div>", result))
+
+    def test_description_cleanup_preserves_normal_japanese_and_single_legitimate_kanji(self):
+        source = (
+            "<![CDATA[<div><h2>商品説明</h2>"
+            "<p>全6巻セット。日本限定版・講談社です。</p>"
+            "<p>糸に縺れがあります。</p>"
+            "<p>Authentic Japanese manga.</p></div>]]>"
+        )
+
+        result = sanitize_description_html(source)
+        visible_text = BeautifulSoup(result, "html.parser").get_text(" ", strip=True)
+
+        self.assertIn("商品説明", visible_text)
+        self.assertIn("全6巻セット。日本限定版・講談社です。", visible_text)
+        self.assertIn("糸に縺れがあります。", visible_text)
+        self.assertIn("Authentic Japanese manga.", visible_text)
+        self.assertNotIn("<![CDATA[", result)
+        self.assertNotIn("]]>", result)
+
+    def test_description_cleanup_is_idempotent(self):
+        source = "<![CDATA[<div><p>笆ｺ Please review the photos carefully.</p><div>(陬ｽ蜩∵ｦりｦ・</div></div>]]>"
+
+        first = sanitize_description_html(source)
+        second = sanitize_description_html(first)
+
+        self.assertEqual(second, first)
+        self.assertIn("Please review the photos carefully.", second)
+        self.assertNotIn("笆ｺ", second)
+
+    def test_build_export_dataframe_sanitizes_description_as_final_guard(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Title": "Cached manga row",
+                    "Description": (
+                        "<![CDATA[<div><div>Product Overview</div>"
+                        "<div>(陬ｽ蜩∵ｦりｦ・</div>"
+                        "<p>笆ｺ Please review photos for exact condition.</p>"
+                        "<div>笆ｺ SIGNAL STATUS: ONLINE // END OF TRANSMISSION 笳・/div></div>"
+                    ),
+                    "Listing Eligibility": "OK",
+                }
+            ]
+        )
+
+        export = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+        description = export.loc[0, "Description"]
+
+        self.assertIn("Please review photos for exact condition.", description)
+        self.assertIn("SIGNAL STATUS: ONLINE // END OF TRANSMISSION", description)
+        for corrupt_text in ("<![CDATA[", "]]>", "陬ｽ蜩", "笆ｺ", "笳・"):
+            self.assertNotIn(corrupt_text, description)
+        self.assertIsNone(re.search(r"(?<!<)/div>", description))
 
     def test_description_append_display_text_matches_added_buyer_text(self):
         addition = build_description_append(
@@ -2680,7 +2770,8 @@ with download_slot.container():
         self.assertNotIn("detected", description.lower())
         self.assertFalse(contains_japanese_text(description))
         self.assertLess(description.index(AUTOFILL_MARKER_START), description.rindex("</div>"))
-        self.assertTrue(description.rstrip().endswith("]]>"))
+        self.assertNotIn("<![CDATA[", description)
+        self.assertNotIn("]]>", description)
         self.assertIn("Description includes total book count: 10 books.", result.loc[0, "Description Detail Notes"])
         self.assertIn("no noticeable scratches or stains", result.loc[0, "Description Detail Notes"])
         self.assertFalse(contains_japanese_text(result.loc[0, "Description Detail Notes"]))

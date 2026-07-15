@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-14-api-cost-v2"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-description-mojibake-v3"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -1700,6 +1700,16 @@ def build_export_eligibility_mask(frame: pd.DataFrame) -> pd.Series:
     return export_mask
 
 
+def apply_export_description_policy(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply a final Description cleanup to fresh and previously cached rows."""
+    result = frame.copy()
+    if "Description" not in result.columns:
+        return result
+    for index, value in result["Description"].items():
+        result.at[index, "Description"] = sanitize_description_html(value)
+    return result
+
+
 def build_export_dataframe(
     frame: pd.DataFrame,
     free_shipping_rollup: Optional[FreeShippingRollupOptions] = None,
@@ -1709,6 +1719,7 @@ def build_export_dataframe(
     export_frame = apply_export_picurl_policy(export_frame)
     export_frame = apply_export_condition_id_policy(export_frame)
     export_frame = apply_export_unit_type_policy(export_frame)
+    export_frame = apply_export_description_policy(export_frame)
     export_frame = export_frame.drop(columns=AI_USAGE_AUDIT_COLUMNS, errors="ignore")
     if free_shipping_rollup and free_shipping_rollup.enabled:
         export_frame = apply_free_shipping_rollup(export_frame, free_shipping_rollup)
@@ -5492,18 +5503,99 @@ def html_escape(value: object) -> str:
     )
 
 
+DESCRIPTION_MOJIBAKE_SIGNATURES = (
+    "陬ｽ",
+    "蜩∵",
+    "驟埼",
+    "霑泌",
+    "髢｢",
+    "隲ｸ",
+    "笳・",
+)
+
+
+def unwrap_cdata_sections(value: object) -> str:
+    """Remove complete or truncated CDATA wrappers from eBay Description HTML."""
+    text = str(value or "")
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", text, flags=re.S)
+    text = re.sub(r"^\s*<!\[CDATA\[", "", text, count=1)
+    text = re.sub(r"\]\]>\s*$", "", text, count=1)
+    return text.replace("<![CDATA[", "").replace("]]>", "")
+
+
+def contains_description_mojibake(value: object) -> bool:
+    """Detect high-confidence UTF-8/CP932 mojibake without flagging normal Japanese."""
+    text = str(value or "")
+    if not text:
+        return False
+    if "\ufffd" in text or any("\x80" <= char <= "\x9f" for char in text):
+        return True
+    if any("\ue000" <= char <= "\uf8ff" for char in text):
+        return True
+    if any(signature in text for signature in DESCRIPTION_MOJIBAKE_SIGNATURES):
+        return True
+    cluster_count = sum(text.count(token) for token in ("縺", "繧", "繝"))
+    halfwidth_katakana_count = len(re.findall(r"[\uff61-\uff9f]", text))
+    return cluster_count >= 2 or (cluster_count >= 1 and halfwidth_katakana_count >= 1)
+
+
+def remove_corrupt_description_text_node(text_node: object) -> None:
+    parent = getattr(text_node, "parent", None)
+    parent_name = str(getattr(parent, "name", "") or "").lower()
+    if parent is not None and parent_name in {"div", "p", "span", "small"} and parent.find(True) is None:
+        parent.decompose()
+        return
+    extract = getattr(text_node, "extract", None)
+    if callable(extract):
+        extract()
+
+
+def sanitize_description_html(description_html: object) -> str:
+    """Keep readable buyer text while removing known mojibake and broken HTML remnants."""
+    html_text = unwrap_cdata_sections(description_html).strip()
+    if not html_text:
+        return ""
+
+    if BeautifulSoup is None:
+        html_text = re.sub(r"笆ｺ(?=\s|$)", "-", html_text)
+        html_text = re.sub(
+            r"[^<>\r\n]*SIGNAL\s+STATUS:\s*ONLINE\s*//\s*END\s+OF\s+TRANSMISSION[^<\r\n]*(?:/div>)?",
+            "SIGNAL STATUS: ONLINE // END OF TRANSMISSION",
+            html_text,
+            flags=re.I,
+        )
+        return html_text.strip()
+
+    soup = BeautifulSoup(html_text, "html.parser")
+    for text_node in list(soup.find_all(string=True)):
+        original = str(text_node)
+        normalized = re.sub(r"笆ｺ(?=\s|$)", "-", original)
+        if re.search(r"SIGNAL\s+STATUS:\s*ONLINE\s*//\s*END\s+OF\s+TRANSMISSION", normalized, flags=re.I):
+            normalized = "SIGNAL STATUS: ONLINE // END OF TRANSMISSION"
+        elif contains_description_mojibake(normalized):
+            remove_corrupt_description_text_node(text_node)
+            continue
+        if normalized != original:
+            text_node.replace_with(normalized)
+
+    return str(soup).strip()
+
+
 def append_description(existing_description: str, addition: str) -> str:
     pattern = re.compile(
         rf"\s*{re.escape(AUTOFILL_MARKER_START)}.*?{re.escape(AUTOFILL_MARKER_END)}",
         flags=re.S,
     )
-    cleaned = pattern.sub("", str(existing_description or "")).rstrip()
+    cleaned = sanitize_description_html(pattern.sub("", str(existing_description or ""))).rstrip()
     addition = str(addition or "").strip()
     if not addition:
         return cleaned.strip()
     if not cleaned:
-        return addition
-    return insert_html_block(cleaned, addition).strip()
+        return sanitize_description_html(addition)
+    return sanitize_description_html(insert_html_block(cleaned, addition)).strip()
 
 
 def insert_html_block(existing_html: str, addition: str) -> str:
