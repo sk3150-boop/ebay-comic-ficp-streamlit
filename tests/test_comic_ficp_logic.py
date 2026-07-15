@@ -28,16 +28,17 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     GEMINI_MODEL_OPTIONS,
     ListingData,
     OPENAI_MODEL_OPTIONS,
+    PREFLIGHT_PENDING_SELECTION_KEY,
     ProcessingConfig,
     ReferenceBookCountResult,
     append_description,
     append_unique_buyer_notes,
+    apply_query_selected_row,
     apply_item_specifics,
     build_description_append,
     build_description_append_display_text,
     build_buyer_description_items,
     build_api_usage,
-    build_clickable_preflight_row_html,
     build_ebay_preflight_table,
     build_exclusion_table,
     build_export_dataframe,
@@ -95,6 +96,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     parse_ai_enrichment_payload,
     process_dataframe,
     redact_sensitive_text,
+    resolve_preflight_selected_position,
     authenticate_public_user,
     public_saved_api_key_exists,
     save_api_key,
@@ -956,61 +958,45 @@ with download_slot.container():
         self.assertEqual(target_rows["Position"].tolist(), ["0", "2"])
         self.assertEqual(target_rows["No"].tolist(), ["1", "3"])
 
-    def test_clickable_preflight_row_links_image_and_title_and_escapes_html(self):
-        row = pd.Series(
-            {
-                "Position": "4",
-                "No": "5",
-                "Image": 'https://example.com/cover.jpg?a=1&b="2"',
-                "Status": "注意",
-                "Title": '<script>alert("x")</script> & Manga',
-                "Images": "3",
-                "Category": "259109",
-                "ConditionID": "4000",
-                "Condition": "Very Good",
-                "Source Condition": "目立った傷や汚れなし",
-                "StartPrice": "55.00",
-                "ShippingProfileName": "Free & Fast",
-                "Issues": "-",
-                "Warnings": 'Check <cover> & "obi"',
-            }
+    def test_preflight_native_selection_maps_visible_row_to_source_position(self):
+        visible_table = pd.DataFrame(
+            [
+                {"Position": "0", "Title": "First"},
+                {"Position": "2", "Title": "Third"},
+            ]
         )
 
-        html = build_clickable_preflight_row_html(row)
+        self.assertEqual(resolve_preflight_selected_position(visible_table, [0]), 0)
+        self.assertEqual(resolve_preflight_selected_position(visible_table, [1]), 2)
+        self.assertIsNone(resolve_preflight_selected_position(visible_table, []))
+        self.assertIsNone(resolve_preflight_selected_position(visible_table, [2]))
+        self.assertIsNone(resolve_preflight_selected_position(visible_table, ["invalid"]))
 
-        self.assertEqual(html.count('href="?comic_ficp_select=4"'), 2)
-        self.assertIn('class="preflight-image-link"', html)
-        self.assertIn('class="preflight-title-link"', html)
-        self.assertIn("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; Manga", html)
-        self.assertNotIn("<script>", html)
-        self.assertIn('cover.jpg?a=1&amp;b=&quot;2&quot;', html)
-        self.assertIn("Free &amp; Fast", html)
-        self.assertIn("Check &lt;cover&gt; &amp; &quot;obi&quot;", html)
+    def test_preflight_native_selection_rejects_blank_source_position(self):
+        table = pd.DataFrame([{"Position": "", "Title": "Summary"}])
 
-    def test_clickable_preflight_row_links_image_placeholder_when_image_is_missing(self):
-        row = pd.Series({"Position": "1", "No": "2", "Status": "OK", "Title": "No image"})
+        self.assertIsNone(resolve_preflight_selected_position(table, [0]))
 
-        html = build_clickable_preflight_row_html(row)
+    def test_pending_preflight_selection_opens_selected_product_before_radio_render(self):
+        fake_st = FakeStreamlit()
+        fake_st.session_state[PREFLIGHT_PENDING_SELECTION_KEY] = 2
+        fake_st.session_state["selected"] = 0
+        fake_st.session_state["view"] = "投入前チェック"
 
-        self.assertEqual(html.count('href="?comic_ficp_select=1"'), 2)
-        self.assertIn("画像なし", html)
+        apply_query_selected_row(fake_st, [0, 1, 2], "selected", "view")
 
-    def test_clickable_preflight_summary_and_invalid_position_have_no_detail_link(self):
-        summary = pd.Series(
-            {
-                "Position": "",
-                "No": "-",
-                "Status": "除外済み",
-                "Title": "ダウンロードCSVから除外される商品: 1件",
-            }
-        )
-        invalid = pd.Series({"Position": "not-a-number", "No": "-", "Status": "OK", "Title": "Invalid"})
+        self.assertEqual(fake_st.session_state["selected"], 2)
+        self.assertEqual(fake_st.session_state["view"], "選択商品")
+        self.assertNotIn(PREFLIGHT_PENDING_SELECTION_KEY, fake_st.session_state)
 
-        summary_html = build_clickable_preflight_row_html(summary)
-        invalid_html = build_clickable_preflight_row_html(invalid)
+    def test_preflight_uses_native_selection_and_large_rows_without_query_links(self):
+        source = (ROOT / "comic_ficp_streamlit_app.py").read_text(encoding="utf-8")
 
-        self.assertNotIn("comic_ficp_select", summary_html)
-        self.assertNotIn("comic_ficp_select", invalid_html)
+        self.assertIn('selection_mode="single-row"', source)
+        self.assertIn("row_height=REVIEW_TABLE_ROW_HEIGHT_PX", source)
+        self.assertIn('"画像（クリックで詳細）"', source)
+        self.assertIn('"Title（クリックで商品詳細）"', source)
+        self.assertNotIn("build_clickable_preflight_row_html", source)
 
     def test_build_export_dataframe_rollup_skips_bad_price_or_missing_shipping(self):
         frame = pd.DataFrame(

@@ -72,8 +72,9 @@ FREE_SHIPPING_PROFILE_OPTIONS = [
 DEFAULT_FREE_SHIPPING_MARKUP_PERCENT = 10.0
 EBAY_ITEM_SPECIFIC_VALUE_MAX_CHARS = 65
 REVIEW_TABLE_HEIGHT_PX = 780
-REVIEW_TABLE_ROW_HEIGHT_PX = 148
+REVIEW_TABLE_ROW_HEIGHT_PX = 176
 REVIEW_TABLE_IMAGE_WIDTH_PX = 190
+PREFLIGHT_PENDING_SELECTION_KEY = "comic_ficp_preflight_pending_position"
 DEFAULT_DIMENSIONAL_DIVISOR_CM = 5000
 DEFAULT_MANGA_HEIGHT_CM = 18.2
 DEFAULT_MANGA_WIDTH_CM = 12.8
@@ -8821,99 +8822,6 @@ def render_global_styles(st) -> None:
             font-size: 12px;
             font-weight: 800;
         }
-        .preflight-row {
-            display: grid;
-            grid-template-columns: 54px 210px 92px minmax(340px, 1.2fr) 78px 100px 210px 110px 230px minmax(250px, 0.9fr) minmax(250px, 0.9fr);
-            gap: 0;
-            min-width: 1940px;
-            border-bottom: 1px solid #e5e7eb;
-            align-items: stretch;
-        }
-        .preflight-row.header {
-            position: sticky;
-            top: 0;
-            z-index: 2;
-            background: #f8fafc;
-            color: #475467 !important;
-            font-size: 12px;
-            font-weight: 800;
-            min-height: 42px;
-        }
-        .preflight-row:not(.header):hover {
-            background: #eff6ff;
-        }
-        .preflight-image-link {
-            display: block;
-            width: 184px;
-            height: 160px;
-            border-radius: 10px;
-            overflow: hidden;
-            border: 2px solid #dbe3f0;
-            background: #ffffff;
-            text-decoration: none !important;
-            transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
-        }
-        .preflight-image-link:hover,
-        .preflight-image-link:focus-visible {
-            border-color: #4f46e5;
-            box-shadow: 0 8px 20px rgba(79, 70, 229, 0.2);
-            transform: translateY(-1px);
-            outline: none;
-        }
-        .preflight-image-link img {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            display: block;
-        }
-        .preflight-title-link {
-            color: #1d4ed8 !important;
-            font-weight: 800;
-            line-height: 1.45;
-            text-decoration: none !important;
-        }
-        .preflight-title-link:hover,
-        .preflight-title-link:focus-visible {
-            color: #3730a3 !important;
-            text-decoration: underline !important;
-            text-underline-offset: 3px;
-        }
-        .preflight-status {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 999px;
-            padding: 5px 10px;
-            font-size: 12px;
-            font-weight: 900;
-            white-space: nowrap;
-        }
-        .preflight-status.is-ok {
-            color: #047857 !important;
-            background: #d1fae5;
-        }
-        .preflight-status.is-warning {
-            color: #a16207 !important;
-            background: #fef3c7;
-        }
-        .preflight-status.is-error {
-            color: #b91c1c !important;
-            background: #fee2e2;
-        }
-        .preflight-status.is-excluded {
-            color: #475569 !important;
-            background: #e2e8f0;
-        }
-        .preflight-condition {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 4px;
-        }
-        .preflight-condition small {
-            color: var(--app-muted) !important;
-            line-height: 1.35;
-        }
         .diagnostic-row {
             display: grid;
             grid-template-columns: 54px 206px minmax(260px, 1fr) 116px 132px minmax(240px, 0.9fr) minmax(340px, 1.15fr);
@@ -9112,6 +9020,15 @@ def display_source_url(row: pd.Series, url_col: str) -> str:
 
 
 def apply_query_selected_row(st, row_options: list[int], selected_index_key: str, view_key: str) -> None:
+    pending_value = st.session_state.pop(PREFLIGHT_PENDING_SELECTION_KEY, None)
+    try:
+        pending_position = int(str(pending_value))
+    except (TypeError, ValueError):
+        pending_position = -1
+    if pending_position in row_options:
+        st.session_state[selected_index_key] = pending_position
+        st.session_state[view_key] = "選択商品"
+
     try:
         raw_value = st.query_params.get("comic_ficp_select")
     except Exception:
@@ -9137,93 +9054,86 @@ def build_select_product_href(position: int) -> str:
     return f"?comic_ficp_select={int(position)}"
 
 
-def build_clickable_preflight_row_html(row: pd.Series) -> str:
-    position_text = get_row_value(row, "Position")
+def resolve_preflight_selected_position(table: pd.DataFrame, selected_rows: object) -> Optional[int]:
+    if not isinstance(selected_rows, (list, tuple)) or not selected_rows:
+        return None
     try:
-        position = int(position_text)
+        visible_position = int(selected_rows[0])
     except (TypeError, ValueError):
-        position = -1
-
-    status = get_row_value(row, "Status") or "-"
-    is_selectable = position >= 0 and status != "除外済み"
-    href = build_select_product_href(position) if is_selectable else ""
-    title = get_row_value(row, "Title") or "-"
-    image_url = get_row_value(row, "Image")
-    link_attributes = (
-        f'href="{html_escape(href)}" target="_self" '
-        f'aria-label="{html_escape(title)}の商品詳細を開く" title="この商品を選択商品で開く"'
-    )
-
-    if image_url:
-        image_content = f'<img src="{html_escape(image_url)}" alt="{html_escape(title)}">'
-    else:
-        image_content = '<div class="clickable-image-placeholder">画像なし</div>'
-    if is_selectable:
-        image_html = f'<a class="preflight-image-link" {link_attributes}>{image_content}</a>'
-        title_html = f'<a class="preflight-title-link" {link_attributes}>{html_escape(title)}</a>'
-    else:
-        image_html = f'<div class="preflight-image-link">{image_content}</div>'
-        title_html = html_escape(title)
-
-    status_class = {
-        "OK": "is-ok",
-        "注意": "is-warning",
-        "要修正": "is-error",
-        "除外済み": "is-excluded",
-    }.get(status, "is-excluded")
-    condition_id = get_row_value(row, "ConditionID") or "-"
-    condition_name = get_row_value(row, "Condition") or "-"
-    source_condition = get_row_value(row, "Source Condition") or "-"
-    condition_html = (
-        '<div class="preflight-condition">'
-        f'<strong>{html_escape(condition_name)} ({html_escape(condition_id)})</strong>'
-        f'<small>商品元: {html_escape(source_condition)}</small>'
-        "</div>"
-    )
-
-    return (
-        '<div class="preflight-row">'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "No") or "-")}</div>'
-        f'<div class="clickable-cell">{image_html}</div>'
-        f'<div class="clickable-cell"><span class="preflight-status {status_class}">{html_escape(status)}</span></div>'
-        f'<div class="clickable-cell">{title_html}</div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "Images") or "-")}</div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "Category") or "-")}</div>'
-        f'<div class="clickable-cell">{condition_html}</div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "StartPrice") or "-")}</div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "ShippingProfileName") or "-")}</div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "Issues") or "-")}</div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "Warnings") or "-")}</div>'
-        "</div>"
-    )
+        return None
+    if visible_position < 0 or visible_position >= len(table):
+        return None
+    try:
+        source_position = int(get_row_value(table.iloc[visible_position], "Position"))
+    except (TypeError, ValueError):
+        return None
+    return source_position if source_position >= 0 else None
 
 
 def render_clickable_preflight_table(st, table: pd.DataFrame) -> None:
-    st.markdown(
-        '<div class="click-hint">画像またはタイトルをクリックすると、その商品を「選択商品」で開きます。</div>',
-        unsafe_allow_html=True,
-    )
-    visible_table = table[table["Status"] != "除外済み"]
+    st.caption("画像またはタイトルを含む商品行をクリックすると、その商品を「選択商品」で開きます。")
+    visible_table = table[table["Status"] != "除外済み"].reset_index(drop=True)
     if visible_table.empty:
         st.info("ダウンロード対象の商品はありません。除外候補タブで理由を確認してください。")
         return
-    rows_html = [
-        '<div class="preflight-row header">'
-        '<div class="clickable-cell">No</div>'
-        '<div class="clickable-cell">画像</div>'
-        '<div class="clickable-cell">判定</div>'
-        '<div class="clickable-cell">Title</div>'
-        '<div class="clickable-cell">画像数</div>'
-        '<div class="clickable-cell">Category</div>'
-        '<div class="clickable-cell">Condition</div>'
-        '<div class="clickable-cell">StartPrice</div>'
-        '<div class="clickable-cell">配送ポリシー</div>'
-        '<div class="clickable-cell">要修正</div>'
-        '<div class="clickable-cell">注意</div>'
-        "</div>"
+    display_columns = [
+        "No",
+        "Image",
+        "Status",
+        "Title",
+        "Images",
+        "Category",
+        "ConditionID",
+        "Condition",
+        "Source Condition",
+        "StartPrice",
+        "ShippingProfileName",
+        "Issues",
+        "Warnings",
     ]
-    rows_html.extend(build_clickable_preflight_row_html(row) for _, row in visible_table.iterrows())
-    st.markdown(f'<div class="clickable-list preflight-list">{"".join(rows_html)}</div>', unsafe_allow_html=True)
+    display_table = visible_table[display_columns].copy()
+    display_table["Title"] = display_table["Title"].map(lambda value: f"↗ {value}")
+    selection_event = st.dataframe(
+        display_table,
+        use_container_width=True,
+        hide_index=True,
+        height=REVIEW_TABLE_HEIGHT_PX,
+        row_height=REVIEW_TABLE_ROW_HEIGHT_PX,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="comic_ficp_preflight_selector",
+        column_config={
+            "No": st.column_config.TextColumn("No", width=56),
+            "Image": st.column_config.ImageColumn(
+                "画像（クリックで詳細）",
+                width=REVIEW_TABLE_IMAGE_WIDTH_PX,
+                help="商品行をクリックすると選択商品で開きます。",
+            ),
+            "Status": st.column_config.TextColumn("判定", width=88),
+            "Title": st.column_config.TextColumn(
+                "Title（クリックで商品詳細）",
+                width=420,
+                help="商品行をクリックすると選択商品で開きます。",
+            ),
+            "Images": st.column_config.TextColumn("画像数", width=78),
+            "Category": st.column_config.TextColumn("Category", width=100),
+            "ConditionID": st.column_config.TextColumn("ConditionID", width=110),
+            "Condition": st.column_config.TextColumn("Condition", width=130),
+            "Source Condition": st.column_config.TextColumn("商品元状態", width=160),
+            "StartPrice": st.column_config.TextColumn("StartPrice", width=110),
+            "ShippingProfileName": st.column_config.TextColumn("配送ポリシー", width=220),
+            "Issues": st.column_config.TextColumn("要修正", width=260),
+            "Warnings": st.column_config.TextColumn("注意", width=260),
+        },
+    )
+    try:
+        selected_rows = selection_event.selection.rows
+    except AttributeError:
+        selected_rows = selection_event.get("selection", {}).get("rows", []) if isinstance(selection_event, dict) else []
+    selected_position = resolve_preflight_selected_position(visible_table, selected_rows)
+    if selected_position is not None:
+        st.session_state[PREFLIGHT_PENDING_SELECTION_KEY] = selected_position
+        st.rerun()
 
 
 def render_clickable_review_table(st, frame: pd.DataFrame, title_col: str, image_col: str, url_col: str) -> None:
