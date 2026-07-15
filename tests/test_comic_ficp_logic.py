@@ -37,6 +37,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     build_description_append_display_text,
     build_buyer_description_items,
     build_api_usage,
+    build_clickable_preflight_row_html,
     build_ebay_preflight_table,
     build_exclusion_table,
     build_export_dataframe,
@@ -922,6 +923,94 @@ with download_slot.container():
         self.assertEqual(export.loc[0, "ConditionID"], "6000")
         self.assertEqual(table.loc[0, "Status"], "注意")
         self.assertIn("欠損ページ", table.loc[0, "Warnings"])
+
+    def test_ebay_preflight_positions_keep_source_rows_after_exclusion(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "Title": "First manga",
+                    "PicURL": "https://example.com/first.jpg",
+                    "Category": "259109",
+                    "ConditionID": "4000",
+                    "StartPrice": "40.00",
+                    "ShippingProfileName": "Free Shipping Policy Fedex",
+                    "Description": "desc",
+                },
+                {"Title": "Excluded manga", "Listing Eligibility": "Excluded"},
+                {
+                    "Title": "Third manga",
+                    "PicURL": "https://example.com/third.jpg",
+                    "Category": "259109",
+                    "ConditionID": "4000",
+                    "StartPrice": "60.00",
+                    "ShippingProfileName": "Free Shipping Policy Fedex",
+                    "Description": "desc",
+                },
+            ]
+        )
+
+        export = build_export_dataframe(source, FreeShippingRollupOptions(enabled=False))
+        table = build_ebay_preflight_table(source, export, "Title")
+        target_rows = table[table["Status"] != "除外済み"]
+
+        self.assertEqual(target_rows["Position"].tolist(), ["0", "2"])
+        self.assertEqual(target_rows["No"].tolist(), ["1", "3"])
+
+    def test_clickable_preflight_row_links_image_and_title_and_escapes_html(self):
+        row = pd.Series(
+            {
+                "Position": "4",
+                "No": "5",
+                "Image": 'https://example.com/cover.jpg?a=1&b="2"',
+                "Status": "注意",
+                "Title": '<script>alert("x")</script> & Manga',
+                "Images": "3",
+                "Category": "259109",
+                "ConditionID": "4000",
+                "Condition": "Very Good",
+                "Source Condition": "目立った傷や汚れなし",
+                "StartPrice": "55.00",
+                "ShippingProfileName": "Free & Fast",
+                "Issues": "-",
+                "Warnings": 'Check <cover> & "obi"',
+            }
+        )
+
+        html = build_clickable_preflight_row_html(row)
+
+        self.assertEqual(html.count('href="?comic_ficp_select=4"'), 2)
+        self.assertIn('class="preflight-image-link"', html)
+        self.assertIn('class="preflight-title-link"', html)
+        self.assertIn("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; Manga", html)
+        self.assertNotIn("<script>", html)
+        self.assertIn('cover.jpg?a=1&amp;b=&quot;2&quot;', html)
+        self.assertIn("Free &amp; Fast", html)
+        self.assertIn("Check &lt;cover&gt; &amp; &quot;obi&quot;", html)
+
+    def test_clickable_preflight_row_links_image_placeholder_when_image_is_missing(self):
+        row = pd.Series({"Position": "1", "No": "2", "Status": "OK", "Title": "No image"})
+
+        html = build_clickable_preflight_row_html(row)
+
+        self.assertEqual(html.count('href="?comic_ficp_select=1"'), 2)
+        self.assertIn("画像なし", html)
+
+    def test_clickable_preflight_summary_and_invalid_position_have_no_detail_link(self):
+        summary = pd.Series(
+            {
+                "Position": "",
+                "No": "-",
+                "Status": "除外済み",
+                "Title": "ダウンロードCSVから除外される商品: 1件",
+            }
+        )
+        invalid = pd.Series({"Position": "not-a-number", "No": "-", "Status": "OK", "Title": "Invalid"})
+
+        summary_html = build_clickable_preflight_row_html(summary)
+        invalid_html = build_clickable_preflight_row_html(invalid)
+
+        self.assertNotIn("comic_ficp_select", summary_html)
+        self.assertNotIn("comic_ficp_select", invalid_html)
 
     def test_build_export_dataframe_rollup_skips_bad_price_or_missing_shipping(self):
         frame = pd.DataFrame(
