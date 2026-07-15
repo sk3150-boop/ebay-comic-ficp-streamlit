@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-description-mojibake-v3"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-description-dedupe-v4"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -3656,6 +3656,9 @@ def build_ai_enrichment_prompt(
             "- Never mention Mercari, source listing, scraping, detection, API, or where the information came from.",
             "- Always leave book_count null. Book count and shipping weight are decided by rules and free reference lookup, not by AI enrichment.",
             "- Description notes must be factual buyer-facing details about condition, included volumes, missing items, shrink-wrap scope, first editions, sun fading, stains, scratches, or unread/new condition.",
+            "- Return each distinct buyer-facing fact once. Do not paraphrase the same condition in multiple notes.",
+            "- Do not repeat the detected total book count. An included-volume note is useful only when it gives a specific volume scope.",
+            "- Describe the item's present condition objectively; do not mention when or how the seller purchased it.",
             "- Do not include price, payment, shipping method, seller's purchase reason, seller greeting text, or marketplace boilerplate.",
             "- If shrink wrap applies only to specific volumes, state the exact volumes.",
             "- If evidence is weak, omit the field.",
@@ -3690,17 +3693,187 @@ def extract_json_object(text: str) -> str:
     return source
 
 
-def clean_ai_description_note(value: object) -> str:
+def normalize_buyer_description_note(value: object) -> str:
     note = clean_text(value)
     if not note or contains_japanese_text(note):
         return ""
     if re.search(r"\b(?:mercari|source listing|scrap(?:e|ing)|detected|api|csv)\b", note, flags=re.I):
         return ""
-    if len(note) > 220:
-        note = note[:219].rstrip(" ,.;") + "."
-    if note and not note.endswith((".", "!", "?")):
+    if note and not note.endswith((".", "!", "?", "…")):
         note += "."
+    if re.fullmatch(
+        r"(?:(?:Purchased|Bought) new and never used|Brand new and never used)\.",
+        note,
+        flags=re.I,
+    ):
+        return "Set is new and unused."
     return note
+
+
+def clean_ai_description_note(value: object) -> str:
+    note = normalize_buyer_description_note(value)
+    if len(note) <= 220:
+        return note
+
+    sentence_end = max(note.rfind(mark, 0, 220) for mark in (".", "!", "?"))
+    if sentence_end >= 80:
+        return note[: sentence_end + 1].strip()
+    shortened = note[:219].rsplit(" ", 1)[0].rstrip(" ,.;")
+    return f"{shortened or note[:219].rstrip(' ,.;')}."
+
+
+def normalize_buyer_note_scope(value: object) -> str:
+    text = normalize_count_text(value).lower()
+    numbers = re.findall(r"\d{1,3}", text)
+    if not numbers:
+        return normalize_key(text)
+    if len(numbers) >= 2 and re.search(r"-|\b(?:to|through)\b", text):
+        return f"{numbers[0]}-{numbers[-1]}"
+    return ",".join(numbers)
+
+
+def buyer_note_semantic_keys(value: object) -> frozenset[str]:
+    """Return conservative fact keys for known buyer-note sentence forms."""
+    note = normalize_buyer_description_note(value)
+    if not note:
+        return frozenset()
+
+    keys: set[str] = set()
+    sentences = re.split(r"(?<=[.!?])\s+", normalize_count_text(note))
+    for raw_sentence in sentences:
+        sentence = clean_text(raw_sentence).strip(" .!? ")
+        if not sentence:
+            continue
+        lower = sentence.lower()
+
+        if re.fullmatch(r"(?:(?:the )?set is |brand )?new and unread|condition: new/unread", lower):
+            keys.update({"condition:new-unused", "condition:unused", "condition:unread"})
+            continue
+        if re.fullmatch(
+            r"(?:(?:the )?set is |brand )?new and (?:unused|never used)|"
+            r"(?:purchased|bought) new and never used|condition: new/unused",
+            lower,
+        ):
+            keys.update({"condition:new-unused", "condition:unused"})
+            continue
+        if re.fullmatch(r"(?:the )?set is (?:unused|never used)|never used", lower):
+            keys.add("condition:unused")
+            continue
+        if re.fullmatch(r"(?:the )?set is unread|unread condition", lower):
+            keys.add("condition:unread")
+            continue
+        if re.fullmatch(r"(?:condition: )?(?:close to unused|near[- ]unused|near mint(?: condition)?)", lower):
+            keys.add("condition:near-unused")
+            continue
+        if re.fullmatch(r"(?:shows |volumes show )?minimal signs of (?:use|wear)", lower):
+            keys.add("condition:minimal-use")
+            continue
+        if re.fullmatch(r"little to no page tanning or sun fading is mentioned", lower):
+            keys.add("condition:tanning-little-none")
+            continue
+        if re.fullmatch(r"page tanning or sun fading may be present", lower):
+            keys.add("condition:tanning-present")
+            continue
+        if re.fullmatch(r"condition: no noticeable scratches or stains", lower):
+            keys.add("condition:no-scratches-stains")
+            continue
+        if re.fullmatch(r"condition: (?:some )?scratches or stains", lower):
+            keys.add("condition:scratches-stains")
+            continue
+        if re.fullmatch(r"clean despite long-term storage", lower):
+            keys.add("condition:clean-storage")
+            continue
+
+        first_edition_match = re.fullmatch(
+            r"volumes? ([\d,\sand-]+) (?:is a|are) first editions?|all volumes are first editions?|"
+            r"first edition volume\(s\) may be included",
+            lower,
+        )
+        if first_edition_match:
+            keys.add("first-edition")
+            if lower.startswith("all volumes"):
+                keys.add("first-edition-scope:all")
+            elif first_edition_match.group(1):
+                keys.add(f"first-edition-scope:{normalize_buyer_note_scope(first_edition_match.group(1))}")
+            continue
+        if re.fullmatch(r"first edition with (?:an? )?obi(?: \(band\))? included", lower):
+            keys.update({"first-edition", "obi:included"})
+            continue
+
+        obi_match = re.fullmatch(
+            r"(?:original )?obi(?:/bands?| bands?)? (?:is|are) (included|missing|not included)"
+            r"(?: for volumes? ([\d,\sand-]+))?",
+            lower,
+        )
+        if obi_match:
+            state = "included" if obi_match.group(1) == "included" else "missing"
+            keys.add(f"obi:{state}")
+            if obi_match.group(2):
+                keys.add(f"obi-scope:{normalize_buyer_note_scope(obi_match.group(2))}")
+            continue
+        if re.fullmatch(r"obi band is included", lower):
+            keys.add("obi:included")
+            continue
+
+        condition_scope_match = re.fullmatch(
+            r"volumes? ([\d,\sand-]+) may have the noted condition",
+            lower,
+        )
+        if condition_scope_match:
+            keys.add(f"condition-scope:{normalize_buyer_note_scope(condition_scope_match.group(1))}")
+            continue
+        area_match = re.fullmatch(r"affected area: (.+)", lower)
+        if area_match:
+            keys.add(f"affected-area:{normalize_key(area_match.group(1))}")
+            continue
+
+        keys.add(f"text:{normalize_key(sentence)}")
+    return frozenset(keys)
+
+
+def deduplicate_buyer_notes(notes: Iterable[object]) -> list[str]:
+    """Collapse exact, synonymous, and strict fact-subset buyer notes."""
+    blocks: list[str] = []
+    fact_sets: list[frozenset[str]] = []
+    exact_keys: set[str] = set()
+    for raw_note in notes:
+        note = normalize_buyer_description_note(raw_note)
+        exact_key = normalize_key(note)
+        if not note or exact_key in exact_keys:
+            continue
+        facts = buyer_note_semantic_keys(note)
+        if facts and any(facts <= existing for existing in fact_sets):
+            continue
+
+        replace_indices = [index for index, existing in enumerate(fact_sets) if existing and existing < facts]
+        if replace_indices:
+            insert_at = min(replace_indices)
+            for index in reversed(replace_indices):
+                exact_keys.discard(normalize_key(blocks[index]))
+                del blocks[index]
+                del fact_sets[index]
+            blocks.insert(insert_at, note)
+            fact_sets.insert(insert_at, facts)
+        else:
+            blocks.append(note)
+            fact_sets.append(facts)
+        exact_keys.add(exact_key)
+
+    result: list[str] = []
+    seen_sentence_facts: list[frozenset[str]] = []
+    for block in blocks:
+        kept_sentences: list[str] = []
+        for raw_sentence in re.split(r"(?<=[.!?])\s+", block):
+            sentence = normalize_buyer_description_note(raw_sentence)
+            facts = buyer_note_semantic_keys(sentence)
+            if not sentence or (facts and any(facts <= existing for existing in seen_sentence_facts)):
+                continue
+            kept_sentences.append(sentence)
+            if facts:
+                seen_sentence_facts.append(facts)
+        if kept_sentences:
+            result.append(" ".join(kept_sentences))
+    return result
 
 
 def clean_ai_specific_value(value: object) -> str:
@@ -3946,15 +4119,7 @@ def merge_ai_specifics(specifics: SpecificsInference, ai: AIEnrichment, candidat
 
 
 def append_unique_buyer_notes(base_notes: list[str], extra_notes: Iterable[str]) -> list[str]:
-    result = list(base_notes)
-    normalized = {normalize_key(note) for note in result}
-    for note in extra_notes:
-        cleaned = clean_ai_description_note(note)
-        key = normalize_key(cleaned)
-        if cleaned and key not in normalized:
-            result.append(cleaned)
-            normalized.add(key)
-    return result
+    return deduplicate_buyer_notes([*base_notes, *extra_notes])
 
 
 def infer_features(text: str, book_count: Optional[int], evidence: str) -> str:
@@ -4887,20 +5052,15 @@ def extract_buyer_relevant_listing_details(
     listing_details_text: str,
     max_items: int = 5,
 ) -> list[str]:
-    details: list[str] = []
-    seen: set[str] = set()
+    candidates: list[str] = []
     for sentence in split_detail_sentences(f"{listing_description}\n{listing_details_text}"):
         detail = summarize_relevant_detail_sentence(sentence)
         if not detail:
             continue
-        key = normalize_key(detail)
-        if key in seen:
-            continue
-        seen.add(key)
-        details.append(detail)
-        if len(details) >= max_items:
+        candidates.append(detail)
+        if len(candidates) >= max(max_items * 3, max_items):
             break
-    return details
+    return deduplicate_buyer_notes(candidates)[:max_items]
 
 
 def split_detail_sentences(text: str) -> list[str]:
@@ -5050,6 +5210,79 @@ def trim_detail_note(note: str, limit: int = 260) -> str:
     return note[: limit - 1].rstrip(" ,.;、。") + "…"
 
 
+def parse_pure_volume_range_note(value: object) -> Optional[tuple[int, int, bool]]:
+    note = normalize_count_text(normalize_buyer_description_note(value))
+    match = re.fullmatch(
+        r"(?:The\s+|This\s+)?(?:Set\s+)?includes\s+volumes?\s+"
+        r"(\d{1,3})\s*(?:-|to|through)\s*(\d{1,3})"
+        r"(?:,\s*(completing the series|which completes the series))?\.",
+        note,
+        flags=re.I,
+    )
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2))
+    if start <= 0 or end < start:
+        return None
+    return start, end, bool(match.group(3))
+
+
+def parse_pure_complete_count_note(value: object) -> Optional[int]:
+    note = normalize_count_text(normalize_buyer_description_note(value))
+    patterns = (
+        r"Complete\s+set\s+of\s+(\d{1,3})\s+(?:volumes?|books?)\.",
+        r"Complete\s+(\d{1,3})[- ](?:volume|book)\s+set\.",
+    )
+    for pattern in patterns:
+        match = re.fullmatch(pattern, note, flags=re.I)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def build_buyer_description_items(
+    book_count: Optional[int],
+    buyer_detail_notes: Optional[Iterable[object]] = None,
+) -> list[str]:
+    notes = deduplicate_buyer_notes(buyer_detail_notes or [])
+    summary = f"This manga set includes {book_count} books." if book_count else ""
+    if not book_count:
+        return notes
+
+    range_candidates: list[tuple[int, int, int, bool]] = []
+    matching_complete_indices: set[int] = set()
+    for index, note in enumerate(notes):
+        range_note = parse_pure_volume_range_note(note)
+        if range_note:
+            start, end, completes_series = range_note
+            if end - start + 1 == book_count:
+                range_candidates.append((index, start, end, completes_series))
+        if parse_pure_complete_count_note(note) == book_count:
+            matching_complete_indices.add(index)
+
+    unique_ranges = {(start, end) for _, start, end, _ in range_candidates}
+    selected_range = next(iter(unique_ranges)) if len(unique_ranges) == 1 else None
+    consumed_indices = set(matching_complete_indices)
+    is_complete = bool(matching_complete_indices)
+    if selected_range:
+        start, end = selected_range
+        matching_range_rows = [item for item in range_candidates if item[1:3] == selected_range]
+        consumed_indices.update(item[0] for item in matching_range_rows)
+        is_complete = is_complete or any(item[3] for item in matching_range_rows)
+        complete_word = "complete " if is_complete else ""
+        summary = (
+            f"This {complete_word}manga set includes {book_count} books "
+            f"(volumes {start}-{end})."
+        )
+    elif is_complete:
+        summary = f"This complete manga set includes {book_count} books."
+
+    remaining = [note for index, note in enumerate(notes) if index not in consumed_indices]
+
+    return ([summary] if summary else []) + remaining
+
+
 def build_description_append(
     *,
     title: str,
@@ -5061,8 +5294,8 @@ def build_description_append(
     source_url: str,
     buyer_detail_notes: Optional[list[str]] = None,
 ) -> str:
-    buyer_detail_notes = buyer_detail_notes or []
-    if not book_count and not buyer_detail_notes:
+    description_items = build_buyer_description_items(book_count, buyer_detail_notes)
+    if not description_items:
         return ""
 
     lines = [
@@ -5071,9 +5304,7 @@ def build_description_append(
         "<p><strong>Item details</strong></p>",
         "<ul>",
     ]
-    if book_count:
-        lines.append(f"<li>This manga set includes {book_count} books.</li>")
-    for note in buyer_detail_notes:
+    for note in description_items:
         lines.append(f"<li>{html_escape(note)}</li>")
     lines.extend(
         [
@@ -5177,6 +5408,16 @@ def translate_english_description_sentence_to_japanese(sentence: str) -> str:
 
     translated = source
     translated = re.sub(
+        r"This (complete )?manga set includes (\d{1,3}) books? \(volumes (\d{1,3})-(\d{1,3})\)\.",
+        lambda match: (
+            f"この漫画セットは{match.group(3)}〜{match.group(4)}巻の"
+            f"{'全' if match.group(1) else ''}{match.group(2)}冊"
+            f"{'セット' if match.group(1) else ''}です。"
+        ),
+        translated,
+        flags=re.I,
+    )
+    translated = re.sub(
         r"\b(?:The\s+)?Set includes volumes? (\d{1,3}) through (\d{1,3})\.",
         lambda match: f"{match.group(1)}〜{match.group(2)}巻を含みます。",
         translated,
@@ -5190,6 +5431,7 @@ def translate_english_description_sentence_to_japanese(sentence: str) -> str:
     )
 
     fallback_patterns = [
+        (r"This complete manga set includes (\d{1,3}) books?\.", r"この漫画セットは全\1冊セットです。"),
         (r"This manga set includes (\d{1,3}) books?\.", r"この漫画セットは\1冊です。"),
         (r"\bItem details\b\.?", "商品詳細"),
         (r"Complete (\d{1,3})[- ]volume set(?: of .+)?\.", r"全\1巻セットです。"),
@@ -5204,6 +5446,8 @@ def translate_english_description_sentence_to_japanese(sentence: str) -> str:
         (r"Volumes? show minimal signs of wear\.", "各巻の使用感は少なめです。"),
         (r"Brand new and unread\.", "新品・未読です。"),
         (r"New and unread\.", "新品・未読です。"),
+        (r"Set is new and unread\.", "新品・未読です。"),
+        (r"Set is new and unused\.", "新品・未使用です。"),
         (r"Brand new and never used\.", "新品・未使用です。"),
         (r"Purchased new and never used\.", "新品で購入後、未使用です。"),
         (r"Unread condition\.", "未読の状態です。"),
@@ -5289,6 +5533,15 @@ def translate_description_added_text_to_japanese(text: object) -> str:
 
     phrase_replacements = [
         (r"\bItem details\b", "商品詳細"),
+        (
+            r"This complete manga set includes (\d+) books \(volumes (\d+)-(\d+)\)\.",
+            r"この漫画セットは\2〜\3巻の全\1冊セットです。",
+        ),
+        (
+            r"This manga set includes (\d+) books \(volumes (\d+)-(\d+)\)\.",
+            r"この漫画セットは\2〜\3巻の\1冊です。",
+        ),
+        (r"This complete manga set includes (\d+) books\.", r"この漫画セットは全\1冊セットです。"),
         (r"This manga set includes (\d+) books\.", r"この漫画セットは\1冊です。"),
         (r"All volumes are first editions\.", "全巻初版です。"),
         (r"First edition volume\(s\) may be included\.", "初版の巻が含まれている可能性があります。"),
@@ -5304,6 +5557,8 @@ def translate_description_added_text_to_japanese(text: object) -> str:
         (r"Condition: close to unused\.", "状態: 未使用に近いです。"),
         (r"Condition: new/unread\.", "状態: 新品・未読です。"),
         (r"Condition: new/unused\.", "状態: 新品・未使用です。"),
+        (r"Set is new and unread\.", "新品・未読です。"),
+        (r"Set is new and unused\.", "新品・未使用です。"),
         (r"Condition: no noticeable scratches or stains\.", "状態: 目立った傷や汚れはありません。"),
         (r"Condition: some scratches or stains\.", "状態: やや傷や汚れがあります。"),
         (r"Condition: scratches or stains\.", "状態: 傷や汚れがあります。"),
@@ -5564,6 +5819,59 @@ def remove_corrupt_description_text_node(text_node: object) -> None:
         extract()
 
 
+def compact_generated_item_detail_lists(soup: object) -> None:
+    """Consolidate duplicate facts in manga autofill lists, including cached CSV rows."""
+    generated_summary_pattern = re.compile(
+        r"^This (?P<complete>complete )?manga set includes (?P<count>\d{1,3}) books?"
+        r"(?: \(volumes (?P<start>\d{1,3})-(?P<end>\d{1,3})\))?\.$",
+        flags=re.I,
+    )
+    for heading in soup.find_all("strong"):
+        if normalize_key(heading.get_text(" ", strip=True)) != "itemdetails":
+            continue
+        start_marker = heading.find_previous(
+            string=lambda value: clean_text(value) == "comic-ficp-autofill"
+        )
+        end_marker = heading.find_next(
+            string=lambda value: clean_text(value) == "/comic-ficp-autofill"
+        )
+        if start_marker is None or end_marker is None:
+            continue
+        details_list = heading.find_next("ul")
+        if details_list is None:
+            continue
+        list_items = details_list.find_all("li", recursive=False)
+        if not list_items:
+            continue
+
+        visible_items = [clean_text(item.get_text(" ", strip=True)) for item in list_items]
+        summary_match = generated_summary_pattern.fullmatch(visible_items[0])
+        if summary_match is None:
+            continue
+
+        book_count = int(summary_match.group("count"))
+        notes: list[str] = []
+        if summary_match.group("start") and summary_match.group("end"):
+            completion = ", completing the series" if summary_match.group("complete") else ""
+            notes.append(
+                f"Set includes volumes {summary_match.group('start')}-{summary_match.group('end')}"
+                f"{completion}."
+            )
+        elif summary_match.group("complete"):
+            notes.append(f"Complete set of {book_count} books.")
+        notes.extend(visible_items[1:])
+
+        compacted_items = build_buyer_description_items(book_count, notes)
+        if compacted_items == visible_items:
+            continue
+        for item in list_items:
+            item.decompose()
+        for text in compacted_items:
+            item = soup.new_tag("li")
+            item.string = text
+            details_list.append(item)
+
+
 def sanitize_description_html(description_html: object) -> str:
     """Keep readable buyer text while removing known mojibake and broken HTML remnants."""
     html_text = unwrap_cdata_sections(description_html).strip()
@@ -5592,6 +5900,7 @@ def sanitize_description_html(description_html: object) -> str:
         if normalized != original:
             text_node.replace_with(normalized)
 
+    compact_generated_item_detail_lists(soup)
     return str(soup).strip()
 
 

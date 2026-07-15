@@ -31,9 +31,11 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     ProcessingConfig,
     ReferenceBookCountResult,
     append_description,
+    append_unique_buyer_notes,
     apply_item_specifics,
     build_description_append,
     build_description_append_display_text,
+    build_buyer_description_items,
     build_api_usage,
     build_ebay_preflight_table,
     build_exclusion_table,
@@ -1169,6 +1171,161 @@ with download_slot.container():
         self.assertNotIn("first", second)
         self.assertEqual(second.count(AUTOFILL_MARKER_START), 1)
 
+    def test_product_overview_merges_matching_book_count_and_volume_range(self):
+        addition = build_description_append(
+            title="",
+            book_count=5,
+            evidence="",
+            weight_kg=None,
+            ficp_charge=None,
+            shipping_usd=None,
+            source_url="",
+            buyer_detail_notes=["Set includes volumes 1-5."],
+        )
+        soup = BeautifulSoup(addition, "html.parser")
+        items = [item.get_text(" ", strip=True) for item in soup.find_all("li")]
+
+        self.assertEqual(items, ["This manga set includes 5 books (volumes 1-5)."])
+        japanese = translate_description_added_text_to_japanese(
+            build_description_append_display_text(addition)
+        )
+        self.assertIn("この漫画セットは1〜5巻の5冊です。", japanese)
+        self.assertIsNone(re.search(r"[A-Za-z]{3,}", japanese))
+
+    def test_product_overview_marks_matching_complete_series_once(self):
+        notes = ["Complete set of 15 volumes.", "Set includes volumes 1-15."]
+        items = build_buyer_description_items(15, notes)
+        reversed_items = build_buyer_description_items(15, reversed(notes))
+
+        self.assertEqual(items, ["This complete manga set includes 15 books (volumes 1-15)."])
+        self.assertEqual(reversed_items, items)
+
+    def test_product_overview_keeps_mismatched_count_and_volume_range_separate(self):
+        items = build_buyer_description_items(5, ["Set includes volumes 2-5."])
+
+        self.assertEqual(
+            items,
+            ["This manga set includes 5 books.", "Set includes volumes 2-5."],
+        )
+
+    def test_product_overview_collapses_unused_condition_synonyms(self):
+        notes = append_unique_buyer_notes(
+            ["Set is new and unused."],
+            [
+                "Purchased new and never used.",
+                "Brand new and never used.",
+                "Condition: new/unused.",
+            ],
+        )
+
+        self.assertEqual(notes, ["Set is new and unused."])
+
+    def test_product_overview_removes_repeated_sentence_inside_distinct_notes(self):
+        notes = append_unique_buyer_notes(
+            ["Set is new and unused. Volume 5 is unopened."],
+            ["Condition: new/unused. Obi band is included."],
+        )
+
+        self.assertEqual(
+            notes,
+            [
+                "Set is new and unused. Volume 5 is unopened.",
+                "Obi band is included.",
+            ],
+        )
+
+    def test_product_overview_preserves_existing_long_buyer_note(self):
+        long_note = "Condition details: " + ("carefully documented " * 13).strip() + "."
+        self.assertGreater(len(long_note), 220)
+
+        notes = append_unique_buyer_notes([long_note], [])
+
+        self.assertEqual(notes, [long_note])
+
+    def test_product_overview_keeps_more_informative_condition_note(self):
+        shorter = (
+            "Volume 6 may have the noted condition. "
+            "Little to no page tanning or sun fading is mentioned. "
+            "Affected area: page edges."
+        )
+        longer = f"{shorter} Condition: no noticeable scratches or stains."
+
+        notes = append_unique_buyer_notes([shorter], [longer])
+
+        self.assertEqual(notes, [longer])
+
+    def test_product_overview_removes_subset_note_but_keeps_distinct_facts(self):
+        detailed = (
+            "Volume 1 is a first edition. Obi is included. "
+            "Volumes 1-2 are unopened."
+        )
+        notes = append_unique_buyer_notes(
+            [detailed],
+            [
+                "First edition with obi (band) included.",
+                "Condition: no noticeable scratches or stains.",
+            ],
+        )
+
+        self.assertEqual(
+            notes,
+            [detailed, "Condition: no noticeable scratches or stains."],
+        )
+
+    def test_cached_product_overview_is_compacted_by_export_final_guard(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Title": "Cached manga row",
+                    "Description": (
+                        f"<div>{AUTOFILL_MARKER_START}<p><strong>Item details</strong></p><ul>"
+                        "<li>This manga set includes 5 books.</li>"
+                        "<li>Set includes volumes 1-5.</li>"
+                        "<li>Set is new and unused.</li>"
+                        "<li>Purchased new and never used.</li>"
+                        "</ul><!-- /comic-ficp-autofill --></div>"
+                    ),
+                    "Listing Eligibility": "OK",
+                }
+            ]
+        )
+
+        first = build_export_dataframe(frame, FreeShippingRollupOptions(enabled=False))
+        second = build_export_dataframe(first, FreeShippingRollupOptions(enabled=False))
+        description = first.loc[0, "Description"]
+        items = [
+            item.get_text(" ", strip=True)
+            for item in BeautifulSoup(description, "html.parser").find_all("li")
+        ]
+
+        self.assertEqual(
+            items,
+            [
+                "This manga set includes 5 books (volumes 1-5).",
+                "Set is new and unused.",
+            ],
+        )
+        self.assertEqual(second.loc[0, "Description"], description)
+
+    def test_description_cleanup_does_not_rewrite_unmarked_item_details(self):
+        source = (
+            "<div><p><strong>Item details</strong></p><ul>"
+            "<li>This manga set includes 5 books.</li>"
+            "<li>Set includes volumes 1-5.</li>"
+            "</ul></div>"
+        )
+
+        result = sanitize_description_html(source)
+        items = [
+            item.get_text(" ", strip=True)
+            for item in BeautifulSoup(result, "html.parser").find_all("li")
+        ]
+
+        self.assertEqual(
+            items,
+            ["This manga set includes 5 books.", "Set includes volumes 1-5."],
+        )
+
     def test_description_inserted_inside_existing_html(self):
         addition = build_description_append(
             title="",
@@ -1887,6 +2044,63 @@ with download_slot.container():
         export = build_export_dataframe(result)
         self.assertNotIn("AI Estimated Cost USD", export.columns)
         self.assertNotIn("AI Total Tokens", export.columns)
+
+    def test_process_dataframe_consolidates_ai_product_overview_facts(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Product URL": "",
+                    "Title": "Sample Manga Set Volumes 1-5",
+                    "Description": "Existing description",
+                    "Shipping Cost": "",
+                }
+            ]
+        )
+        config = ProcessingConfig(
+            url_col="Product URL",
+            title_col="Title",
+            description_col="Description",
+            shipping_col="Shipping Cost",
+            exchange_rate_jpy_per_usd=150,
+            enable_scrape=False,
+            enable_ai_enrichment=True,
+            ai_provider="gemini",
+            ai_model="gemini-test",
+            ai_api_key="test-key",
+        )
+        ai_result = AIEnrichment(
+            provider="gemini",
+            model="gemini-test",
+            status="ok",
+            description_notes=[
+                "Set includes volumes 1-5.",
+                "Set is new and unused.",
+                "Purchased new and never used.",
+            ],
+            specifics={},
+        )
+
+        with patch("comic_ficp_streamlit_app.enrich_listing_with_ai", return_value=ai_result):
+            result = process_dataframe(frame, config)
+
+        description = result.loc[0, "Description"]
+        items = [
+            item.get_text(" ", strip=True)
+            for item in BeautifulSoup(description, "html.parser").find_all("li")
+        ]
+        self.assertEqual(
+            items,
+            [
+                "This manga set includes 5 books (volumes 1-5).",
+                "Set is new and unused.",
+            ],
+        )
+        self.assertEqual(description.count("new and unused"), 1)
+        self.assertNotIn("Purchased new", description)
+        self.assertIn(
+            "この漫画セットは1〜5巻の5冊です。",
+            result.loc[0, "Description Added Japanese"],
+        )
 
     def test_process_dataframe_does_not_use_ai_book_count_for_shipping(self):
         frame = pd.DataFrame(
