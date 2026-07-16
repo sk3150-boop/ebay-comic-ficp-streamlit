@@ -56,6 +56,14 @@ PUBLIC_MODE_ENV = "COMIC_FICP_PUBLIC_MODE"
 PUBLIC_DATABASE_URL_ENV = "COMIC_FICP_DATABASE_URL"
 PUBLIC_KEY_SECRET_ENV = "COMIC_FICP_KEY_ENCRYPTION_SECRET"
 PUBLIC_SESSION_USER_KEY = "comic_ficp_public_user"
+PUBLIC_REMEMBER_COOKIE_NAME = "comic_ficp_remember"
+PUBLIC_REMEMBER_DAYS = 30
+PUBLIC_REMEMBER_MAX_TOKENS_PER_USER = 5
+PUBLIC_PENDING_REMEMBER_TOKEN_KEY = "comic_public_pending_remember_token"
+PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY = "comic_public_active_remember_token_hash"
+PUBLIC_CLEAR_REMEMBER_COOKIE_KEY = "comic_public_clear_remember_cookie"
+PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY = "comic_public_remember_restore_blocked"
+PUBLIC_LOGIN_NOTICE_KEY = "comic_public_login_notice"
 PUBLIC_AUTH_DB_FALLBACK_PATH = API_KEY_STORE_PATH.with_name("public_auth.sqlite3")
 UPLOAD_CACHE_RAW_PATH = API_KEY_STORE_PATH.with_name("last_uploaded_csv.bin")
 UPLOAD_CACHE_META_PATH = API_KEY_STORE_PATH.with_name("last_uploaded_csv.json")
@@ -825,6 +833,23 @@ def init_public_auth_storage(database_url: Optional[str] = None) -> None:
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comic_ficp_remember_tokens (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at DOUBLE PRECISION NOT NULL,
+                expires_at DOUBLE PRECISION NOT NULL,
+                last_used_at DOUBLE PRECISION NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS comic_ficp_remember_tokens_user_id_idx
+            ON comic_ficp_remember_tokens (user_id)
+            """
+        )
 
 
 def public_auth_config_status() -> tuple[bool, str]:
@@ -882,6 +907,139 @@ def authenticate_public_user(username: str, password: str, database_url: Optiona
     if not verify_public_password(password, str(password_hash)):
         return False, {}, "ユーザー名またはパスワードが違います。"
     return True, {"id": str(user_id), "username": str(stored_username)}, "ログインしました。"
+
+
+def generate_public_remember_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def is_plausible_public_remember_token(token: object) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{64}", str(token or "").strip()))
+
+
+def hash_public_remember_token(token: object) -> str:
+    return hashlib.sha256(str(token or "").strip().encode("utf-8")).hexdigest()
+
+
+def cleanup_expired_public_remember_tokens(
+    database_url: Optional[str] = None,
+    now: Optional[float] = None,
+) -> int:
+    init_public_auth_storage(database_url)
+    cutoff = float(now if now is not None else time.time())
+    with public_db_connection(database_url) as (conn, backend):
+        cursor = conn.cursor()
+        param = public_db_param(backend)
+        cursor.execute(f"DELETE FROM comic_ficp_remember_tokens WHERE expires_at <= {param}", (cutoff,))
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
+
+def create_public_remember_token(
+    user_id: object,
+    database_url: Optional[str] = None,
+    now: Optional[float] = None,
+    days: int = PUBLIC_REMEMBER_DAYS,
+) -> str:
+    init_public_auth_storage(database_url)
+    current = float(now if now is not None else time.time())
+    token = generate_public_remember_token()
+    token_hash = hash_public_remember_token(token)
+    expires_at = current + max(1, int(days)) * 24 * 60 * 60
+    with public_db_connection(database_url) as (conn, backend):
+        cursor = conn.cursor()
+        param = public_db_param(backend)
+        cursor.execute(f"DELETE FROM comic_ficp_remember_tokens WHERE expires_at <= {param}", (current,))
+        cursor.execute(
+            f"""
+            INSERT INTO comic_ficp_remember_tokens (token_hash, user_id, created_at, expires_at, last_used_at)
+            VALUES ({param}, {param}, {param}, {param}, {param})
+            """,
+            (token_hash, int(user_id), current, expires_at, current),
+        )
+        cursor.execute(
+            f"""
+            SELECT token_hash
+            FROM comic_ficp_remember_tokens
+            WHERE user_id = {param}
+            ORDER BY last_used_at DESC, created_at DESC
+            """,
+            (int(user_id),),
+        )
+        stale_hashes = [str(row[0]) for row in cursor.fetchall()[PUBLIC_REMEMBER_MAX_TOKENS_PER_USER:]]
+        if stale_hashes:
+            cursor.executemany(
+                f"DELETE FROM comic_ficp_remember_tokens WHERE token_hash = {param}",
+                [(value,) for value in stale_hashes],
+            )
+    return token
+
+
+def authenticate_public_remember_token(
+    token: object,
+    database_url: Optional[str] = None,
+    now: Optional[float] = None,
+) -> tuple[bool, dict[str, str], str]:
+    token_text = str(token or "").strip()
+    if not is_plausible_public_remember_token(token_text):
+        return False, {}, "ログイン維持情報が無効です。"
+    init_public_auth_storage(database_url)
+    current = float(now if now is not None else time.time())
+    token_hash = hash_public_remember_token(token_text)
+    with public_db_connection(database_url) as (conn, backend):
+        cursor = conn.cursor()
+        param = public_db_param(backend)
+        cursor.execute(f"DELETE FROM comic_ficp_remember_tokens WHERE expires_at <= {param}", (current,))
+        cursor.execute(
+            f"""
+            SELECT u.id, u.username
+            FROM comic_ficp_remember_tokens t
+            JOIN comic_ficp_users u ON u.id = t.user_id
+            WHERE t.token_hash = {param}
+            """,
+            (token_hash,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False, {}, "ログイン維持情報が見つからないか、期限が切れています。"
+        cursor.execute(
+            f"UPDATE comic_ficp_remember_tokens SET last_used_at = {param} WHERE token_hash = {param}",
+            (current, token_hash),
+        )
+    return True, {"id": str(row[0]), "username": str(row[1])}, "ログイン状態を復元しました。"
+
+
+def delete_public_remember_token_hash(token_hash: object, database_url: Optional[str] = None) -> int:
+    token_hash_text = str(token_hash or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", token_hash_text):
+        return 0
+    init_public_auth_storage(database_url)
+    with public_db_connection(database_url) as (conn, backend):
+        cursor = conn.cursor()
+        param = public_db_param(backend)
+        cursor.execute(
+            f"DELETE FROM comic_ficp_remember_tokens WHERE token_hash = {param}",
+            (token_hash_text,),
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
+
+def delete_public_remember_token(token: object, database_url: Optional[str] = None) -> int:
+    token_text = str(token or "").strip()
+    if not is_plausible_public_remember_token(token_text):
+        return 0
+    return delete_public_remember_token_hash(hash_public_remember_token(token_text), database_url)
+
+
+def delete_public_remember_tokens_for_user(user_id: object, database_url: Optional[str] = None) -> int:
+    init_public_auth_storage(database_url)
+    with public_db_connection(database_url) as (conn, backend):
+        cursor = conn.cursor()
+        param = public_db_param(backend)
+        cursor.execute(
+            f"DELETE FROM comic_ficp_remember_tokens WHERE user_id = {param}",
+            (int(user_id),),
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
 
 
 def encrypt_public_api_key(api_key: str, secret: Optional[str] = None) -> str:
@@ -1073,11 +1231,108 @@ def current_public_user(st) -> Optional[dict[str, str]]:
     return None
 
 
+def get_public_remember_cookie(st) -> str:
+    try:
+        context = getattr(st, "context", None)
+        cookies = getattr(context, "cookies", None)
+        if cookies is None:
+            return ""
+        return str(cookies.get(PUBLIC_REMEMBER_COOKIE_NAME, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def build_public_remember_cookie_script(token: str = "", *, clear_cookie: bool = False) -> str:
+    token_text = str(token or "").strip()
+    if token_text and not is_plausible_public_remember_token(token_text):
+        raise ValueError("Invalid remember token")
+    return f"""
+    <script>
+    (function() {{
+      const cookieName = {json.dumps(PUBLIC_REMEMBER_COOKIE_NAME)};
+      const token = {json.dumps(token_text)};
+      const maxAge = {int(PUBLIC_REMEMBER_DAYS * 24 * 60 * 60)};
+      const clearCookie = {json.dumps(bool(clear_cookie))};
+      let secure = "";
+      try {{
+        secure = window.parent.location.protocol === "https:" ? "; Secure" : "";
+      }} catch (error) {{
+        secure = window.location.protocol === "https:" ? "; Secure" : "";
+      }}
+      const common = "; Path=/; SameSite=Strict; Priority=High" + secure;
+
+      function writeCookie(cookieText) {{
+        try {{ document.cookie = cookieText; }} catch (error) {{}}
+        try {{ window.parent.document.cookie = cookieText; }} catch (error) {{}}
+      }}
+
+      if (clearCookie) {{
+        writeCookie(cookieName + "=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT" + common);
+      }} else if (token) {{
+        writeCookie(cookieName + "=" + encodeURIComponent(token) + "; Max-Age=" + maxAge + common);
+      }}
+    }})();
+    </script>
+    """
+
+
+def render_public_remember_cookie_script(token: str = "", *, clear_cookie: bool = False) -> None:
+    script = build_public_remember_cookie_script(token, clear_cookie=clear_cookie)
+    try:
+        import streamlit as streamlit_runtime
+    except Exception:
+        return
+    if hasattr(streamlit_runtime, "iframe"):
+        streamlit_runtime.iframe(script, height=1, width=1, tab_index=-1)
+        return
+    try:  # pragma: no cover - compatibility for Streamlit 1.37-1.55.
+        import streamlit.components.v1 as components
+    except Exception:
+        return
+    components.html(script, height=1, width=1)
+
+
+def revoke_current_public_remember_token(st, database_url: Optional[str] = None) -> int:
+    token_hashes: set[str] = set()
+    active_hash = str(st.session_state.get(PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY, "") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", active_hash):
+        token_hashes.add(active_hash)
+    cookie_token = get_public_remember_cookie(st)
+    if is_plausible_public_remember_token(cookie_token):
+        token_hashes.add(hash_public_remember_token(cookie_token))
+    deleted = 0
+    for token_hash in token_hashes:
+        deleted += delete_public_remember_token_hash(token_hash, database_url)
+    st.session_state.pop(PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY, None)
+    return deleted
+
+
 def clear_public_session_work_data(st) -> None:
     for key in list(st.session_state.keys()):
         key_text = str(key)
         if key_text.startswith("comic_ficp_") or key_text.startswith("usd_jpy_"):
             st.session_state.pop(key, None)
+
+
+def restore_public_user_from_remember_cookie(
+    st,
+    database_url: Optional[str] = None,
+) -> Optional[dict[str, str]]:
+    if st.session_state.get(PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY):
+        return None
+    token = get_public_remember_cookie(st)
+    if not token:
+        return None
+    authed, user_data, _message = authenticate_public_remember_token(token, database_url)
+    if not authed:
+        st.session_state[PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY] = True
+        render_public_remember_cookie_script(clear_cookie=True)
+        return None
+    clear_public_session_work_data(st)
+    st.session_state[PUBLIC_SESSION_USER_KEY] = user_data
+    st.session_state[PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY] = hash_public_remember_token(token)
+    st.session_state.pop(PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY, None)
+    return user_data
 
 
 def render_public_login_gate(st) -> bool:
@@ -1088,18 +1343,49 @@ def render_public_login_gate(st) -> bool:
         st.error(message)
         st.stop()
         return False
-    user = current_public_user(st)
+    if st.session_state.pop(PUBLIC_CLEAR_REMEMBER_COOKIE_KEY, False):
+        render_public_remember_cookie_script(clear_cookie=True)
+        st.session_state[PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY] = True
+
+    user = current_public_user(st) or restore_public_user_from_remember_cookie(st, public_database_url())
     if user:
+        pending_token = str(st.session_state.pop(PUBLIC_PENDING_REMEMBER_TOKEN_KEY, "") or "").strip()
+        if pending_token:
+            render_public_remember_cookie_script(token=pending_token)
+        login_notice = st.session_state.pop(PUBLIC_LOGIN_NOTICE_KEY, None)
+        if isinstance(login_notice, dict) and login_notice.get("text"):
+            if login_notice.get("warning"):
+                st.warning(str(login_notice["text"]))
+            else:
+                st.success(str(login_notice["text"]))
         with st.sidebar:
             st.markdown(
                 f'<div class="account-card"><span>ログイン中</span><strong>{html_escape(user["username"])}</strong></div>',
                 unsafe_allow_html=True,
             )
             if st.button("ログアウト", type="tertiary", icon=":material/logout:", use_container_width=True):
-                st.session_state.pop(PUBLIC_SESSION_USER_KEY, None)
+                logout_warning = ""
+                try:
+                    delete_public_remember_tokens_for_user(user["id"], public_database_url())
+                except Exception as error:
+                    logout_warning = (
+                        "この端末のログイン情報は削除しましたが、サーバー側のログイン保持情報を失効できませんでした: "
+                        + redact_sensitive_text(error)
+                    )
                 clear_public_session_work_data(st)
+                st.session_state[PUBLIC_CLEAR_REMEMBER_COOKIE_KEY] = True
+                st.session_state[PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY] = True
+                if logout_warning:
+                    st.session_state[PUBLIC_LOGIN_NOTICE_KEY] = {"warning": True, "text": logout_warning}
                 st.rerun()
         return True
+
+    login_notice = st.session_state.pop(PUBLIC_LOGIN_NOTICE_KEY, None)
+    if isinstance(login_notice, dict) and login_notice.get("text"):
+        if login_notice.get("warning"):
+            st.warning(str(login_notice["text"]))
+        else:
+            st.success(str(login_notice["text"]))
 
     st.markdown('<div class="login-heading"><span>SECURE WORKSPACE</span><h2>作業を始める</h2><p>アカウントごとに、安全な作業スペースを用意します。</p></div>', unsafe_allow_html=True)
     login_info_col, login_form_col = st.columns([0.42, 0.58], gap="large", vertical_alignment="top")
@@ -1124,8 +1410,23 @@ def render_public_login_gate(st) -> bool:
             tab_login, tab_signup = st.tabs(["ログイン", "はじめての方"])
             with tab_login:
                 st.caption("登録済みのユーザー名とパスワードを入力してください。")
-                login_username = st.text_input("ユーザー名", key="public_login_username")
-                login_password = st.text_input("パスワード", type="password", key="public_login_password")
+                login_username = st.text_input(
+                    "ユーザー名",
+                    key="public_login_username",
+                    autocomplete="username",
+                )
+                login_password = st.text_input(
+                    "パスワード",
+                    type="password",
+                    key="public_login_password",
+                    autocomplete="current-password",
+                )
+                remember_login = st.checkbox(
+                    f"この端末でログイン状態を保持する（{PUBLIC_REMEMBER_DAYS}日間）",
+                    value=True,
+                    key="public_remember_login",
+                    help="パスワードそのものは保存しません。共有PCではOFFにしてください。",
+                )
                 if st.button(
                     "ログインして作業を続ける",
                     type="primary",
@@ -1138,17 +1439,56 @@ def render_public_login_gate(st) -> bool:
                         public_database_url(),
                     )
                     if authed:
+                        try:
+                            revoke_current_public_remember_token(st, public_database_url())
+                        except Exception:
+                            pass
                         clear_public_session_work_data(st)
                         st.session_state[PUBLIC_SESSION_USER_KEY] = user_data
-                        st.success(auth_message)
+                        if remember_login:
+                            try:
+                                remember_token = create_public_remember_token(user_data["id"], public_database_url())
+                                st.session_state[PUBLIC_PENDING_REMEMBER_TOKEN_KEY] = remember_token
+                                st.session_state[PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY] = hash_public_remember_token(remember_token)
+                                st.session_state.pop(PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY, None)
+                            except Exception as error:
+                                st.session_state[PUBLIC_LOGIN_NOTICE_KEY] = {
+                                    "warning": True,
+                                    "text": "ログインは成功しましたが、ログイン状態の保持設定に失敗しました: "
+                                    + redact_sensitive_text(error),
+                                }
+                        else:
+                            st.session_state[PUBLIC_CLEAR_REMEMBER_COOKIE_KEY] = True
+                            st.session_state[PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY] = True
+                        st.session_state.setdefault(PUBLIC_LOGIN_NOTICE_KEY, {"warning": False, "text": auth_message})
                         st.rerun()
                     else:
                         st.warning(auth_message)
             with tab_signup:
                 st.caption("8文字以上のパスワードで、新しい作業スペースを作成します。")
-                signup_username = st.text_input("ユーザー名", key="public_signup_username")
-                signup_password = st.text_input("パスワード（8文字以上）", type="password", key="public_signup_password")
-                signup_password_confirm = st.text_input("パスワード確認", type="password", key="public_signup_password_confirm")
+                signup_username = st.text_input(
+                    "ユーザー名",
+                    key="public_signup_username",
+                    autocomplete="username",
+                )
+                signup_password = st.text_input(
+                    "パスワード（8文字以上）",
+                    type="password",
+                    key="public_signup_password",
+                    autocomplete="new-password",
+                )
+                signup_password_confirm = st.text_input(
+                    "パスワード確認",
+                    type="password",
+                    key="public_signup_password_confirm",
+                    autocomplete="new-password",
+                )
+                signup_remember_login = st.checkbox(
+                    f"この端末でログイン状態を保持する（{PUBLIC_REMEMBER_DAYS}日間）",
+                    value=True,
+                    key="public_signup_remember_login",
+                    help="パスワードそのものは保存しません。共有PCではOFFにしてください。",
+                )
                 if st.button(
                     "無料アカウントを作成",
                     type="secondary",
@@ -1168,7 +1508,22 @@ def render_public_login_gate(st) -> bool:
                             if authed:
                                 clear_public_session_work_data(st)
                                 st.session_state[PUBLIC_SESSION_USER_KEY] = user_data
-                                st.success(create_message)
+                                if signup_remember_login:
+                                    try:
+                                        remember_token = create_public_remember_token(user_data["id"], public_database_url())
+                                        st.session_state[PUBLIC_PENDING_REMEMBER_TOKEN_KEY] = remember_token
+                                        st.session_state[PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY] = hash_public_remember_token(remember_token)
+                                        st.session_state.pop(PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY, None)
+                                    except Exception as error:
+                                        st.session_state[PUBLIC_LOGIN_NOTICE_KEY] = {
+                                            "warning": True,
+                                            "text": "アカウントは作成できましたが、ログイン状態の保持設定に失敗しました: "
+                                            + redact_sensitive_text(error),
+                                        }
+                                else:
+                                    st.session_state[PUBLIC_CLEAR_REMEMBER_COOKIE_KEY] = True
+                                    st.session_state[PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY] = True
+                                st.session_state.setdefault(PUBLIC_LOGIN_NOTICE_KEY, {"warning": False, "text": create_message})
                                 st.rerun()
                             else:
                                 st.success(create_message + " ログインしてください。")

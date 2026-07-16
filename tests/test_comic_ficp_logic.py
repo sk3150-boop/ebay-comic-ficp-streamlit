@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pandas as pd
@@ -29,6 +30,10 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     ListingData,
     OPENAI_MODEL_OPTIONS,
     PREFLIGHT_PENDING_SELECTION_KEY,
+    PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY,
+    PUBLIC_REMEMBER_COOKIE_NAME,
+    PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY,
+    PUBLIC_SESSION_USER_KEY,
     ProcessingConfig,
     ReferenceBookCountResult,
     append_description,
@@ -37,6 +42,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     apply_item_specifics,
     build_description_append,
     build_description_append_display_text,
+    build_public_remember_cookie_script,
     build_buyer_description_items,
     build_api_usage,
     build_ebay_preflight_table,
@@ -50,6 +56,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     build_source_detail_preview,
     build_workflow_steps_html,
     create_public_user,
+    create_public_remember_token,
     build_specifics_review_rows,
     build_specifics_summary_items,
     calculate_billable_weight_kg,
@@ -65,6 +72,8 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     default_ai_model_for_provider,
     decide_manga_export_condition,
     delete_public_saved_api_key,
+    delete_public_remember_token,
+    delete_public_remember_tokens_for_user,
     diagnose_processed_row,
     detect_book_count,
     detect_book_count_limit_issue,
@@ -88,6 +97,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     infer_mercari_url_from_image_url,
     infer_specifics,
     infer_specifics_with_notes,
+    is_plausible_public_remember_token,
     is_likely_image_url,
     lookup_complete_set_book_count,
     load_saved_api_key,
@@ -98,6 +108,9 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     redact_sensitive_text,
     resolve_preflight_selected_position,
     render_product_selection_dataframe,
+    render_public_remember_cookie_script,
+    restore_public_user_from_remember_cookie,
+    authenticate_public_remember_token,
     authenticate_public_user,
     public_saved_api_key_exists,
     save_api_key,
@@ -124,9 +137,10 @@ class FakeUpload:
 
 
 class FakeStreamlit:
-    def __init__(self, query_params=None):
+    def __init__(self, query_params=None, cookies=None):
         self.session_state = {}
         self.query_params = query_params or {}
+        self.context = SimpleNamespace(cookies=cookies or {})
 
 
 class ComicFicpLogicTest(unittest.TestCase):
@@ -1154,6 +1168,119 @@ with download_slot.container():
             deleted, delete_message = delete_public_saved_api_key(user_a["id"], "gemini", db_url)
             self.assertTrue(deleted, delete_message)
             self.assertFalse(public_saved_api_key_exists(user_a["id"], "gemini", db_url))
+
+    def test_public_remember_token_restores_user_without_storing_raw_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "public.sqlite3"
+            db_url = f"sqlite:///{db_path}"
+            created, message = create_public_user("seller_a", "password-one", db_url)
+            self.assertTrue(created, message)
+            authed, user, auth_message = authenticate_public_user("seller_a", "password-one", db_url)
+            self.assertTrue(authed, auth_message)
+
+            token = create_public_remember_token(user["id"], db_url, now=1000.0, days=30)
+            self.assertTrue(is_plausible_public_remember_token(token))
+            restored, restored_user, restored_message = authenticate_public_remember_token(token, db_url, now=1200.0)
+
+            self.assertTrue(restored, restored_message)
+            self.assertEqual(restored_user, user)
+            self.assertNotIn(token.encode("utf-8"), db_path.read_bytes())
+
+    def test_public_remember_token_expires_and_current_device_can_be_revoked_alone(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_url = f"sqlite:///{Path(temp_dir) / 'public.sqlite3'}"
+            created, message = create_public_user("seller_a", "password-one", db_url)
+            self.assertTrue(created, message)
+            authed, user, auth_message = authenticate_public_user("seller_a", "password-one", db_url)
+            self.assertTrue(authed, auth_message)
+
+            first_device = create_public_remember_token(user["id"], db_url, now=1000.0, days=30)
+            second_device = create_public_remember_token(user["id"], db_url, now=1001.0, days=30)
+            self.assertEqual(delete_public_remember_token(first_device, db_url), 1)
+            self.assertFalse(authenticate_public_remember_token(first_device, db_url, now=1200.0)[0])
+            self.assertTrue(authenticate_public_remember_token(second_device, db_url, now=1200.0)[0])
+
+            expiring = create_public_remember_token(user["id"], db_url, now=2000.0, days=1)
+            self.assertFalse(authenticate_public_remember_token(expiring, db_url, now=2000.0 + 24 * 60 * 60)[0])
+
+    def test_public_logout_can_revoke_all_tokens_for_the_account(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_url = f"sqlite:///{Path(temp_dir) / 'public.sqlite3'}"
+            self.assertTrue(create_public_user("seller_a", "password-one", db_url)[0])
+            user = authenticate_public_user("seller_a", "password-one", db_url)[1]
+            first_device = create_public_remember_token(user["id"], db_url, now=1000.0)
+            second_device = create_public_remember_token(user["id"], db_url, now=1001.0)
+
+            self.assertEqual(delete_public_remember_tokens_for_user(user["id"], db_url), 2)
+            self.assertFalse(authenticate_public_remember_token(first_device, db_url, now=1002.0)[0])
+            self.assertFalse(authenticate_public_remember_token(second_device, db_url, now=1002.0)[0])
+
+    def test_public_remember_token_rejects_malformed_or_cross_account_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_url = f"sqlite:///{Path(temp_dir) / 'public.sqlite3'}"
+            self.assertFalse(authenticate_public_remember_token("too-short", db_url)[0])
+            self.assertFalse(authenticate_public_remember_token("!" * 64, db_url)[0])
+
+            self.assertTrue(create_public_user("seller_a", "password-one", db_url)[0])
+            self.assertTrue(create_public_user("seller_b", "password-two", db_url)[0])
+            user_a = authenticate_public_user("seller_a", "password-one", db_url)[1]
+            token_a = create_public_remember_token(user_a["id"], db_url, now=1000.0)
+            restored, restored_user, restored_message = authenticate_public_remember_token(token_a, db_url, now=1001.0)
+            self.assertTrue(restored, restored_message)
+            self.assertEqual(restored_user["username"], "seller_a")
+            self.assertNotEqual(restored_user["username"], "seller_b")
+
+    def test_public_remember_cookie_uses_secure_attributes_without_query_parameter(self):
+        token = "A" * 64
+        script = build_public_remember_cookie_script(token)
+
+        self.assertIn(PUBLIC_REMEMBER_COOKIE_NAME, script)
+        self.assertIn("Max-Age=", script)
+        self.assertIn("Path=/", script)
+        self.assertIn("SameSite=Strict", script)
+        self.assertIn("; Secure", script)
+        self.assertNotIn("query", script.lower())
+        self.assertNotIn("searchParams", script)
+        self.assertNotIn("location.replace", script)
+
+        clear_script = build_public_remember_cookie_script(clear_cookie=True)
+        self.assertIn("Max-Age=0", clear_script)
+        self.assertIn("Thu, 01 Jan 1970", clear_script)
+
+    def test_public_remember_cookie_renderer_uses_positive_iframe_size(self):
+        with patch("streamlit.iframe", create=True) as iframe:
+            render_public_remember_cookie_script("A" * 64)
+
+        iframe.assert_called_once()
+        self.assertEqual(iframe.call_args.kwargs["height"], 1)
+        self.assertEqual(iframe.call_args.kwargs["width"], 1)
+
+    def test_public_remember_cookie_restores_user_and_clears_old_workspace_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_url = f"sqlite:///{Path(temp_dir) / 'public.sqlite3'}"
+            self.assertTrue(create_public_user("seller_a", "password-one", db_url)[0])
+            user = authenticate_public_user("seller_a", "password-one", db_url)[1]
+            token = create_public_remember_token(user["id"], db_url)
+            fake_st = FakeStreamlit(cookies={PUBLIC_REMEMBER_COOKIE_NAME: token})
+            fake_st.session_state["comic_ficp_processed_df"] = pd.DataFrame([{"Title": "stale"}])
+            fake_st.session_state["unrelated"] = "keep"
+
+            restored_user = restore_public_user_from_remember_cookie(fake_st, db_url)
+
+            self.assertEqual(restored_user, user)
+            self.assertEqual(fake_st.session_state[PUBLIC_SESSION_USER_KEY], user)
+            self.assertRegex(fake_st.session_state[PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY], r"^[0-9a-f]{64}$")
+            self.assertNotIn("comic_ficp_processed_df", fake_st.session_state)
+            self.assertEqual(fake_st.session_state["unrelated"], "keep")
+
+    def test_invalid_public_remember_cookie_is_blocked_and_scheduled_for_deletion(self):
+        fake_st = FakeStreamlit(cookies={PUBLIC_REMEMBER_COOKIE_NAME: "invalid"})
+        with patch("comic_ficp_streamlit_app.render_public_remember_cookie_script") as render_cookie:
+            restored_user = restore_public_user_from_remember_cookie(fake_st, "sqlite:///:memory:")
+
+        self.assertIsNone(restored_user)
+        self.assertTrue(fake_st.session_state[PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY])
+        render_cookie.assert_called_once_with(clear_cookie=True)
 
     def test_public_mode_disables_disk_csv_and_processed_dataframe_cache(self):
         fake_st = FakeStreamlit(query_params={"comic_ficp_select": "1"})
