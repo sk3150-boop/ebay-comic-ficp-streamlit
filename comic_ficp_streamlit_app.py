@@ -6,6 +6,7 @@ from ctypes import wintypes
 from contextlib import contextmanager
 import hmac
 import io
+from itertools import product
 import json
 import hashlib
 import math
@@ -46,7 +47,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-session-safe-selection-v8"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-17-title-value-retention-v9"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -160,6 +161,7 @@ TITLE_RESOLUTION_AUDIT_COLUMNS = [
     "Title Resolution Candidates",
     "Title Resolution Required",
     "Title Resolution Complete Volume Count",
+    "Title Resolution Creators",
 ]
 
 ANILIST_TITLE_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -534,6 +536,20 @@ class AniListTitleCandidate:
     site_url: str = ""
 
 
+@dataclass(frozen=True)
+class MangaListingTitleFacts:
+    """Listing-specific facts that must survive canonical series-title correction."""
+
+    volume_range: str = ""
+    explicit_complete: bool = False
+    complete_conflict: bool = False
+    first_edition: bool = False
+    edition_year: str = ""
+    obi_present: bool = False
+    limited_edition: bool = False
+    creator_credit_present: bool = False
+
+
 @dataclass
 class CanonicalTitleResult:
     original_title: str = ""
@@ -548,6 +564,7 @@ class CanonicalTitleResult:
     source_urls: list[str] = field(default_factory=list)
     grounded_prompt_count: int = 0
     complete_volume_count: Optional[int] = None
+    creators: list[str] = field(default_factory=list)
     usage: APIUsage = field(default_factory=APIUsage)
 
 
@@ -2568,6 +2585,31 @@ def extract_native_series_title(value: object) -> str:
     if not source or not contains_japanese_text(source):
         return ""
     source = re.sub(r"https?://\S+", " ", source, flags=re.I)
+
+    # A quoted Japanese title is the strongest identity signal in marketplace titles.
+    # Keep it separate from edition, creator, condition, and volume metadata around it.
+    for quoted_match in list(re.finditer(r"[「『]([^」』]{2,80})[」』]", source)):
+        quoted = re.sub(r"\s+", " ", quoted_match.group(1)).strip(" -_/.,:;(){}｜|!！?？＊※")
+        quoted_is_listing_metadata = bool(
+            re.search(
+                r"全巻|完結|初版|新品|未使用|未開封|美品|中古|送料|匿名|即購入|値下げ|"
+                r"特典|限定版|特装版|豪華版|(?:18|19|20)\d{2}\s*年?版|"
+                r"帯\s*(?:付|付き|あり|なし)|(?:第\s*)?\d{1,3}\s*巻|セット|まとめ売り|"
+                r"(?:[一-龯々]{2,20}[・、,])+[一-龯々]{2,20}",
+                quoted,
+                flags=re.I,
+            )
+        )
+        if (
+            contains_japanese_text(quoted)
+            and len(normalize_native_title_key(quoted)) >= 2
+            and len(quoted) <= 65
+            and not quoted_is_listing_metadata
+        ):
+            return quoted
+        if quoted_is_listing_metadata:
+            source = source.replace(quoted_match.group(0), " ", 1)
+
     source = re.sub(
         r"[【\[][^]】]*(?:美品|新品|未使用|中古|送料|匿名|即購入|値下げ|特典|初版)[^]】]*[】\]]",
         " ",
@@ -2576,21 +2618,26 @@ def extract_native_series_title(value: object) -> str:
     )
     source = re.sub(r"[【】\[\]「」『』]", " ", source)
     patterns = [
-        r"(?<!\d)\d{1,3}\s*(?:-|~|to|through|から)\s*\d{1,3}\s*(?:巻|卷|冊|册)?",
+        r"(?:第\s*)?\d{1,3}\s*(?:巻|卷)?\s*(?:-|~|to|through|から)\s*(?:第\s*)?\d{1,3}\s*(?:巻|卷|冊|册)?",
         r"(?:全|完結)\s*\d{1,3}\s*(?:巻|卷|冊|册)",
-        r"\d{1,3}\s*(?:巻|卷|冊|册)",
+        r"(?:第\s*)?\d{1,3}\s*(?:巻|卷|冊|册)",
         r"\b(?:vol(?:ume)?s?\.?|books?)\s*\d{1,3}(?:\s*(?:-|~|to|through)\s*\d{1,3})?\b",
         r"\b\d{1,3}[- ](?:volume|book)\s*set\b",
         r"\bby\s+(?:mercari|メルカリ).*$",
         r"\b(?:complete|full)\s+(?:manga\s+|comic\s+)?set\b",
         r"全巻(?:セット)?|完結(?:セット)?|セット|まとめ売り|まとめ|(?:^|\s)(?:漫画|マンガ|コミック|本)(?:\s|$)",
-        r"美品|新品(?:未使用)?|未使用(?:に近い)?|中古|送料込み|匿名配送|即購入(?:OK|可)?|値下げ不可",
+        r"(?<!\d)(?:18|19|20)\d{2}\s*年?",
+        r"初版本?|全巻\s*初版|帯(?:付(?:き)?|付き|つき|あり|有り|有)",
+        r"(?:[一-龯々ぁ-んァ-ヶー]{2,20}[、,・]\s*)+[一-龯々ぁ-んァ-ヶー]{2,20}(?:作|著)",
+        r"(?:^|\s)[一-龯々ぁ-んァ-ヶー]{2,20}(?:作|著)(?=\s|$)",
+        r"(?:原作|作画|著者?|作者)\s*[:：]?\s*[一-龯々ぁ-んァ-ヶー・]{2,20}",
+        r"美品|新品(?:未使用|未開封)?|未使用(?:に近い)?|未開封|中古|送料込み|匿名配送|即購入(?:OK|可)?|値下げ不可",
         r"メルカリ|ヤフオク|Yahoo!?\s*Auctions?|ラクマ|PayPayフリマ|marketplace",
     ]
     cleaned = source
     for pattern in patterns:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.I)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/.,:;(){}｜|!！?？")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_/.,:;(){}｜|!！?？＊※")
     generic_keys = {
         "全巻",
         "完結",
@@ -2612,6 +2659,12 @@ def extract_existing_english_series_title(value: object) -> str:
     source = unicodedata.normalize("NFKC", clean_text(value))
     if not source or contains_japanese_text(source):
         return ""
+    source = re.sub(
+        r",\s*(?:18|19|20)\d{2}\s+(?=[^,]{0,50}(?:first|1st|limited|collector|obi))[^,]*(?=,|$)",
+        " ",
+        source,
+        flags=re.I,
+    )
     patterns = [
         r"\b(?:vol(?:ume)?s?\.?|vols?\.?)\s*\d{1,3}\s*(?:-|~|to|through)\s*\d{1,3}\b",
         r"\b\d{1,3}\s*(?:-|~|to|through)\s*\d{1,3}\s*(?:vol(?:ume)?s?|vols?\.?|books?)\b",
@@ -2619,6 +2672,9 @@ def extract_existing_english_series_title(value: object) -> str:
         r"\b(?:complete|completed|full|all)\s*(?:manga|comic|series)?\s*(?:set|series|volumes|vols)?\b",
         r"\b(?:manga|comic|comics|set|lot|bundle|japanese|english)\b",
         r"\b(?:excellent|very good|good|used|new|sealed|unused)\s*(?:condition)?\b",
+        r"\b(?:first editions?|1st ed(?:ition)?s?|limited edition|collector'?s edition)\b",
+        r"\b(?:with\s+(?:an?\s+)?obi|obi\s+(?:included|present))\b",
+        r"(?<!\d)(?:18|19|20)\d{2}(?!\d)",
         r"\s+by\s+[A-Z][A-Za-z .,'\-&]{1,80}$",
     ]
     cleaned = source
@@ -2678,28 +2734,182 @@ def unique_clean_strings(values: Iterable[object]) -> list[str]:
     return result
 
 
-def compose_ebay_manga_title(
-    series_title: str,
-    evidence_text: str,
-    book_count: Optional[int],
-    complete_volume_count: Optional[int] = None,
-) -> str:
-    series_title = clean_text(series_title)
-    if validate_canonical_series_title(series_title):
-        return ""
-    volume_range = infer_volume_range(evidence_text)
+def extract_manga_listing_title_facts(
+    evidence_text: object,
+    book_count: Optional[int] = None,
+) -> MangaListingTitleFacts:
+    """Extract only listing-level facts supported by explicit, non-negative evidence."""
+    source = unicodedata.normalize("NFKC", normalize_count_text(evidence_text))
+    volume_range = infer_volume_range(source)
     range_start = range_end = None
     if volume_range and "-" in volume_range:
         try:
             range_start, range_end = (int(value) for value in volume_range.split("-", 1))
         except Exception:
             range_start = range_end = None
-    verified_complete = bool(
+
+    completion_negative = bool(
+        re.search(
+            r"未完結|完結\s*(?:では|じゃ)?\s*(?:ない|ありません)|"
+            r"全巻\s*(?:では|じゃ)?\s*(?:ない|ありません)|(?:全て|全部)?\s*揃っていない|"
+            r"欠巻|巻抜け|抜け巻|"
+            r"\b(?:not\s+(?:(?:a|the)\s+)?complete(?:\s+set)?|incomplete|"
+            r"missing\s+(?:a\s+)?vol(?:ume)?\.?\s*\d+)\b",
+            source,
+            flags=re.I,
+        )
+    )
+    complete_evidence = False
+    if range_start == 1 and range_end:
+        japanese_range = (
+            rf"(?:第\s*)?{range_start}\s*(?:巻|卷)?\s*[-~]\s*"
+            rf"(?:第\s*)?{range_end}\s*(?:巻|卷)"
+        )
+        english_range = (
+            rf"(?:vol(?:ume)?s?\.?\s*)?{range_start}\s*[-~]\s*{range_end}"
+            rf"(?:\s*(?:vol(?:ume)?s?|books?))?"
+        )
+        completion = r"(?:全巻|完結|\bcomplete(?:d)?\b|\bfull\s+(?:manga\s+|comic\s+)?set\b)"
+        complete_evidence = bool(
+            re.search(rf"(?:{japanese_range}|{english_range}).{{0,28}}{completion}", source, flags=re.I | re.S)
+            or re.search(rf"{completion}.{{0,28}}(?:{japanese_range}|{english_range})", source, flags=re.I | re.S)
+        )
+        if completion_negative:
+            complete_evidence = False
+        if book_count and int(book_count) != range_end:
+            complete_evidence = False
+    elif book_count:
+        count = int(book_count)
+        complete_evidence = bool(
+            re.search(rf"(?:全\s*{count}\s*巻|{count}\s*巻.{{0,12}}完結)", source, flags=re.I | re.S)
+            or re.search(
+                rf"\b(?:complete|full)\s+{count}\s*[- ]?vol(?:ume)?\s+set\b|"
+                rf"\b{count}\s*[- ]?vol(?:ume)?\s+(?:complete|full)\s+set\b",
+                source,
+                flags=re.I,
+            )
+        ) and not completion_negative
+
+    first_positive = list(
+        re.finditer(r"初版本?|全巻\s*初版|\bfirst editions?\b|\b1st ed(?:ition)?s?\b", source, flags=re.I)
+    )
+    first_negative = bool(
+        re.search(
+            r"初版(?:では|で)?(?:ない|ありません|不明)|not\s+(?:a\s+)?first edition|first edition unknown",
+            source,
+            flags=re.I,
+        )
+    )
+    partial_first = bool(
+        re.search(
+            r"(?:第?\s*\d{1,3}\s*巻\s*(?:のみ|だけ)(?:が|は)?|"
+            r"第?\s*\d{1,3}\s*巻(?:が|は)|vol(?:ume)?\.?\s*\d{1,3}\s+only).{0,16}"
+            r"(?:初版|first edition|1st ed)|"
+            r"(?:初版|first edition|1st ed).{0,16}(?:は\s*)?"
+            r"(?:第?\s*\d{1,3}\s*巻\s*(?:のみ|だけ)|only\s+vol(?:ume)?\.?\s*\d{1,3})",
+            source,
+            flags=re.I | re.S,
+        )
+        or re.search(r"vol(?:ume)?\.?\s*\d{1,3}\s+is\s+(?:a\s+)?first edition", source, flags=re.I)
+    )
+    first_edition = bool(first_positive and not first_negative and not partial_first)
+
+    edition_year = ""
+    if first_edition:
+        for year_match in re.finditer(r"(?<!\d)((?:18|19|20)\d{2})(?!\d)", source):
+            if any(abs(year_match.start() - edition_match.start()) <= 40 for edition_match in first_positive):
+                edition_year = year_match.group(1)
+                break
+
+    obi_negative = bool(
+        re.search(
+            r"帯\s*(?:なし|無し|無|欠品|欠け|ありません)|without\s+(?:an?\s+)?obi|"
+            r"obi\s+(?:missing|absent|not\s+included)",
+            source,
+            flags=re.I,
+        )
+    )
+    obi_positive = bool(
+        re.search(
+            r"帯\s*(?:付(?:き)?|付き|つき|あり|有り|有)|with\s+(?:an?\s+)?obi|"
+            r"obi\s+(?:included|present)",
+            source,
+            flags=re.I,
+        )
+    )
+    partial_obi = bool(
+        re.search(
+            r"(?:第?\s*\d{1,3}\s*巻\s*(?:のみ|だけ)(?:が|は)?).{0,16}"
+            r"帯\s*(?:付(?:き)?|付き|つき|あり|有り|有)|"
+            r"帯\s*(?:付(?:き)?|付き|つき|あり|有り|有).{0,16}"
+            r"(?:第?\s*\d{1,3}\s*巻\s*(?:のみ|だけ))|"
+            r"only\s+vol(?:ume)?\.?\s*\d{1,3}.{0,16}(?:with\s+obi|obi\s+included)",
+            source,
+            flags=re.I | re.S,
+        )
+    )
+    creator_credit_present = bool(
+        re.search(
+            r"(?:[一-龯々ぁ-んァ-ヶ]{2,20}[、,・]\s*)+[一-龯々ぁ-んァ-ヶ]{2,20}(?:作|著)|"
+            r"(?:原作|作画|著者?|作者)\s*[:：]?\s*[一-龯々ぁ-んァ-ヶA-Za-z]|"
+            r"\bby\s+[A-Z][A-Za-z .,'\-&]{2,80}",
+            source,
+            flags=re.I,
+        )
+    )
+    limited_negative = bool(
+        re.search(r"限定版\s*(?:では|じゃ)?\s*(?:ない|ありません)|not\s+(?:a\s+)?limited edition", source, flags=re.I)
+    )
+    return MangaListingTitleFacts(
+        volume_range=volume_range,
+        explicit_complete=complete_evidence,
+        complete_conflict=completion_negative,
+        first_edition=first_edition,
+        edition_year=edition_year,
+        obi_present=obi_positive and not obi_negative and not partial_obi,
+        limited_edition=bool(re.search(r"限定版|\blimited edition\b", source, flags=re.I)) and not limited_negative,
+        creator_credit_present=creator_credit_present,
+    )
+
+
+def _compact_creator_name(value: str) -> str:
+    parts = [part for part in re.split(r"\s+", clean_text(value)) if part]
+    if len(parts) <= 1:
+        return " ".join(parts)
+    return f"{parts[0][0]} {parts[-1]}"
+
+
+def compose_ebay_manga_title(
+    series_title: str,
+    evidence_text: str,
+    book_count: Optional[int],
+    complete_volume_count: Optional[int] = None,
+    creators: Iterable[str] = (),
+) -> str:
+    series_title = clean_text(series_title)
+    if validate_canonical_series_title(series_title):
+        return ""
+    facts = extract_manga_listing_title_facts(evidence_text, book_count)
+    volume_range = facts.volume_range
+    range_start = range_end = None
+    if volume_range and "-" in volume_range:
+        try:
+            range_start, range_end = (int(value) for value in volume_range.split("-", 1))
+        except Exception:
+            range_start = range_end = None
+    base_series_complete = bool(
         complete_volume_count
         and range_start == 1
-        and range_end == complete_volume_count
+        and range_end == int(complete_volume_count)
         and (not book_count or int(book_count) == int(complete_volume_count))
     )
+    edition_specific_complete = bool(
+        facts.explicit_complete
+        and range_start == 1
+        and range_end
+        and (not book_count or int(book_count) == range_end)
+    )
+    verified_complete = not facts.complete_conflict and (base_series_complete or edition_specific_complete)
     if volume_range:
         scope = (
             f"Complete Set Volumes {volume_range}"
@@ -2707,49 +2917,137 @@ def compose_ebay_manga_title(
             else f"Volumes {volume_range} Set"
         )
     elif book_count:
-        complete_scope_evidence = bool(
-            re.search(
-                r"全巻|完結|\b(?:complete|full)\s+(?:manga\s+|comic\s+)?set\b",
-                evidence_text,
-                flags=re.I,
-            )
-        )
+        complete_scope_evidence = facts.explicit_complete
         scope = (
             f"Complete {int(book_count)}-Volume Set"
             if complete_scope_evidence
-            and complete_volume_count
-            and int(book_count) == int(complete_volume_count)
             else f"{int(book_count)}-Volume Set"
         )
     else:
         scope = "Manga Set"
 
-    extra_parts: list[str] = []
-    normalized_evidence = normalize_count_text(evidence_text)
-    if re.search(r"全巻\s*初版|all\s+(?:volumes?\s+)?first editions?", normalized_evidence, flags=re.I):
-        extra_parts.append("First Editions")
-    if re.search(r"全巻\s*帯(?:付き|あり)|all\s+volumes?\s+with\s+obi", normalized_evidence, flags=re.I):
-        extra_parts.append("with Obi")
-    if re.search(r"限定版|limited edition", normalized_evidence, flags=re.I):
-        extra_parts.append("Limited Edition")
+    trusted_creators = [
+        value
+        for value in unique_clean_strings(creators)
+        if value.isascii() and re.search(r"[A-Za-z]", value) and len(value) <= 40
+    ][:2]
+
+    has_high_value_facts = bool(
+        facts.first_edition
+        or facts.obi_present
+        or facts.limited_edition
+        or trusted_creators
+    )
 
     def build(base: str, scope_text: str, extras: Iterable[str]) -> str:
         return re.sub(r"\s+", " ", " ".join([base, scope_text, "Japanese", *extras])).strip()
 
     base_without_generic = re.sub(r"\b(?:Manga|Comic)\b", " ", series_title, flags=re.I)
     base_without_generic = re.sub(r"\s+", " ", base_without_generic).strip()
-    candidates = [
-        build(series_title, scope, extra_parts),
-        build(series_title, scope, []),
-        build(series_title, scope.replace("Volumes", "Vols"), []),
-        build(base_without_generic or series_title, scope.replace("Volumes", "Vols"), []),
-        build(series_title, scope.replace("Complete Set Volumes", "Complete Vols"), []),
-        build(series_title, re.sub(r"\bSet\b", "", scope.replace("Volumes", "Vols"), flags=re.I), []),
-    ]
-    for candidate in unique_clean_strings(candidates):
-        if len(candidate) <= 80:
-            return candidate
-    return ""
+    if not has_high_value_facts:
+        candidates = [
+            build(series_title, scope, []),
+            build(series_title, scope.replace("Volumes", "Vols"), []),
+            build(base_without_generic or series_title, scope.replace("Volumes", "Vols"), []),
+            build(series_title, scope.replace("Complete Set Volumes", "Complete Vols"), []),
+            build(series_title, re.sub(r"\bSet\b", "", scope.replace("Volumes", "Vols"), flags=re.I), []),
+        ]
+        for candidate in unique_clean_strings(candidates):
+            if len(candidate) <= 80:
+                return candidate
+        return ""
+
+    if volume_range:
+        if verified_complete:
+            scope_options = [
+                (f"Complete Set Volumes {volume_range}", 60),
+                (f"Vols {volume_range} Complete Set", 52),
+                (f"Vol {volume_range} Complete", 42),
+                (f"{volume_range} Complete", 25),
+            ]
+        else:
+            scope_options = [
+                (f"Volumes {volume_range} Set", 60),
+                (f"Vols {volume_range} Set", 52),
+                (f"Vol {volume_range} Set", 42),
+                (f"{volume_range} Set", 25),
+            ]
+    elif book_count:
+        scope_options = [
+            (scope, 60),
+            (scope.replace("-Volume", " Vol"), 45),
+            (f"{int(book_count)} Vol Set", 30),
+        ]
+    else:
+        scope_options = [("Manga Set", 40), ("Set", 20)]
+
+    if facts.first_edition:
+        edition_options = [
+            (f"{facts.edition_year} First Edition".strip(), 620 if facts.edition_year else 540),
+            (f"{facts.edition_year} 1st Ed".strip(), 630 if facts.edition_year else 550),
+            ("First Edition", 540),
+            ("1st Ed", 550),
+            ("", 0),
+        ]
+    else:
+        edition_options = [("", 0)]
+    limited_options = [("Limited Edition", 260), ("Limited Ed", 245), ("", 0)] if facts.limited_edition else [("", 0)]
+    obi_options = [("with Obi", 190), ("Obi", 180), ("", 0)] if facts.obi_present else [("", 0)]
+    if trusted_creators:
+        full_creators = " ".join(trusted_creators)
+        compact_creators = " ".join(_compact_creator_name(value) for value in trusted_creators)
+        creator_options = [
+            (full_creators, 220 * len(trusted_creators)),
+            (compact_creators, 210 * len(trusted_creators)),
+            (trusted_creators[0], 220),
+            (_compact_creator_name(trusted_creators[0]), 210),
+            ("", 0),
+        ]
+    else:
+        creator_options = [("", 0)]
+    language_options = [("Japanese", 45), ("JPN", 40), ("", 0)]
+
+    ranked: list[tuple[int, int, int, str]] = []
+    for scope_option, edition_option, limited_option, obi_option, creator_option, language_option in product(
+        scope_options,
+        edition_options,
+        limited_options,
+        obi_options,
+        creator_options,
+        language_options,
+    ):
+        pieces = [
+            series_title,
+            scope_option[0],
+            edition_option[0],
+            limited_option[0],
+            obi_option[0],
+            creator_option[0],
+            language_option[0],
+        ]
+        candidate = re.sub(r"\s+", " ", " ".join(piece for piece in pieces if piece)).strip()
+        if len(candidate) > 80:
+            continue
+        semantic_score = sum(
+            option[1]
+            for option in (
+                scope_option,
+                edition_option,
+                limited_option,
+                obi_option,
+                creator_option,
+                language_option,
+            )
+        )
+        readability = sum(
+            1
+            for token in ("Volumes", "Complete Set", "First Edition", "with Obi", "Japanese")
+            if token in candidate
+        )
+        ranked.append((semantic_score, readability, len(candidate), candidate))
+    if not ranked:
+        return ""
+    return max(ranked)[-1]
 
 
 SAFE_NON_MISSING_CONTEXT = re.compile(
@@ -3172,7 +3470,7 @@ def anilist_manga_title_lookup(
           volumes
           siteUrl
           staff(perPage: 10) {
-            edges { role node { name { full native } } }
+            edges { role node { name { full native alternative } } }
           }
         }
       }
@@ -3203,14 +3501,44 @@ def anilist_manga_title_lookup(
             volumes = int(raw_volumes) if raw_volumes is not None else None
         except Exception:
             volumes = None
-        authors: list[str] = []
-        for edge in (item.get("staff", {}) or {}).get("edges", []) or []:
-            if not isinstance(edge, dict) or "story" not in clean_text(edge.get("role", "")).lower():
+        creator_entries: list[tuple[str, int, str]] = []
+        for edge_index, edge in enumerate((item.get("staff", {}) or {}).get("edges", []) or []):
+            if not isinstance(edge, dict):
+                continue
+            role = clean_text(edge.get("role", "")).lower()
+            role_base = re.sub(r"\s*\([^)]*\)\s*$", "", role).strip()
+            is_art = role_base in {"art", "story & art", "art & story"}
+            is_story = role_base in {"story", "story & art", "art & story"}
+            is_original_creator = role_base == "original creator"
+            if not (is_story or is_art or is_original_creator):
                 continue
             name = (edge.get("node", {}) or {}).get("name", {}) or {}
-            author = first_nonblank(name.get("full", ""), name.get("native", ""))
-            if author and author not in authors:
-                authors.append(author)
+            full_name = clean_text(name.get("full", ""))
+            alternatives = [
+                alternative
+                for alternative in unique_clean_strings(name.get("alternative", []) or [])
+                if alternative.isascii() and re.search(r"[A-Za-z]", alternative)
+            ]
+            pen_names = [alternative for alternative in alternatives if len(alternative.split()) == 1]
+            creator = first_nonblank(
+                pen_names[0] if is_story and pen_names else "",
+                full_name if full_name.isascii() else "",
+                alternatives[0] if alternatives else "",
+            )
+            creator_role = "original" if is_original_creator else "story" if is_story else "art"
+            if creator:
+                creator_entries.append((creator_role, edge_index, creator))
+        authors: list[str] = []
+        if any(role == "original" for role, _, _ in creator_entries):
+            role_priority = {"original": 0, "story": 1, "art": 2}
+        else:
+            role_priority = {"art": 0, "story": 1, "original": 2}
+        for _, _, creator in sorted(
+            creator_entries,
+            key=lambda entry: (role_priority.get(entry[0], 9), entry[1]),
+        ):
+            if creator not in authors:
+                authors.append(creator)
         synonyms = tuple(
             value
             for value in unique_clean_strings(item.get("synonyms", []) or [])
@@ -5079,6 +5407,7 @@ def _clone_cached_title_result_for_listing(
         original_title=clean_text(original_title),
         candidates=list(result.candidates),
         source_urls=list(result.source_urls),
+        creators=list(result.creators),
         usage=APIUsage(provider=result.usage.provider, model=result.usage.model),
         grounded_prompt_count=0,
     )
@@ -5088,6 +5417,7 @@ def _clone_cached_title_result_for_listing(
             evidence_text,
             book_count,
             cloned.complete_volume_count,
+            cloned.creators,
         )
         if not cloned.final_title:
             cloned.status = "failed"
@@ -5130,6 +5460,7 @@ def _store_canonical_title_result(cache_key: str, result: CanonicalTitleResult, 
         final_title="",
         candidates=list(result.candidates),
         source_urls=list(result.source_urls),
+        creators=list(result.creators),
         usage=APIUsage(provider=result.usage.provider, model=result.usage.model),
         grounded_prompt_count=0,
     )
@@ -5158,6 +5489,8 @@ def classify_title_evidence_urls(urls: Iterable[object]) -> dict[str, int]:
         "darkhorse.com",
         "penguinrandomhouse.com",
         "tokyopop.com",
+        "shueisha.co.jp",
+        "s-manga.net",
     }
     database_domains = {"anilist.co", "myanimelist.net", "mangaupdates.com", "anime-planet.com"}
     counts = {"ebay": 0, "official": 0, "database": 0, "other": 0}
@@ -5178,7 +5511,7 @@ def classify_title_evidence_urls(urls: Iterable[object]) -> dict[str, int]:
         if _domain_matches(hostname, ebay_domains) or re.search(r"\bebay\b", title_key):
             counts["ebay"] += 1
         elif _domain_matches(hostname, official_domains) or re.search(
-            r"\b(?:kodansha|viz media|yen press|seven seas entertainment|square enix manga|dark horse|penguin random house|tokyopop)\b",
+            r"\b(?:kodansha|viz media|yen press|seven seas entertainment|square enix manga|dark horse|penguin random house|tokyopop|shueisha)\b",
             title_key,
         ):
             counts["official"] += 1
@@ -5254,6 +5587,7 @@ def _fallback_anilist_title_result(
             evidence_text,
             book_count,
             candidate.volumes if candidate else None,
+            candidate.authors if candidate else (),
         )
         if final_title:
             source_urls = [candidate.site_url] if candidate and candidate.site_url else []
@@ -5270,6 +5604,7 @@ def _fallback_anilist_title_result(
                 source_urls=source_urls,
                 grounded_prompt_count=grounded_prompt_count,
                 complete_volume_count=candidate.volumes if candidate else None,
+                creators=list(candidate.authors if candidate else ()),
                 usage=usage or APIUsage(),
             )
     return CanonicalTitleResult(
@@ -5324,10 +5659,18 @@ def resolve_canonical_manga_title(
             evidence="海外タイトル補正は無効です。",
         )
 
+    current_time = float(now if now is not None else time.time())
     native_key = normalize_native_title_key(native_title)
     manual_title = clean_text((config.title_overrides or {}).get(native_key, ""))
     if manual_title and not validate_canonical_series_title(manual_title):
-        final_title = compose_ebay_manga_title(manual_title, evidence_text, book_count)
+        manual_candidate = anilist_manga_title_lookup(native_title, now=current_time)
+        final_title = compose_ebay_manga_title(
+            manual_title,
+            evidence_text,
+            book_count,
+            manual_candidate.volumes if manual_candidate else None,
+            manual_candidate.authors if manual_candidate else (),
+        )
         if final_title:
             return CanonicalTitleResult(
                 original_title=original_title,
@@ -5339,9 +5682,10 @@ def resolve_canonical_manga_title(
                 confidence="high",
                 method="account-specific manual override",
                 evidence="このアカウントに保存された手動補正を最優先で適用しました。",
+                complete_volume_count=manual_candidate.volumes if manual_candidate else None,
+                creators=list(manual_candidate.authors if manual_candidate else ()),
             )
 
-    current_time = float(now if now is not None else time.time())
     cache_key = _title_cache_key(native_title, config)
     cached_result = (run_cache or {}).get(cache_key)
     if cached_result is None:
@@ -5450,6 +5794,7 @@ def resolve_canonical_manga_title(
             evidence_text,
             book_count,
             anilist_candidate.volumes if anilist_candidate else None,
+            anilist_candidate.authors if anilist_candidate else (),
         )
         if not final_title:
             raise ValueError("80文字以内で安全なeBayタイトルを生成できませんでした。")
@@ -5495,6 +5840,7 @@ def resolve_canonical_manga_title(
             source_urls=source_urls,
             grounded_prompt_count=grounded_prompt_count,
             complete_volume_count=anilist_candidate.volumes if anilist_candidate else None,
+            creators=list(anilist_candidate.authors if anilist_candidate else ()),
             usage=usage,
         )
     except Exception as error:
@@ -5649,6 +5995,7 @@ def append_unique_buyer_notes(base_notes: list[str], extra_notes: Iterable[str])
 
 def infer_features(text: str, book_count: Optional[int], evidence: str) -> str:
     features: list[str] = []
+    listing_facts = extract_manga_listing_title_facts(f"{text}\n{evidence}", book_count)
 
     def add(value: str) -> None:
         if value and value not in features:
@@ -5656,11 +6003,11 @@ def infer_features(text: str, book_count: Optional[int], evidence: str) -> str:
 
     if book_count and book_count > 1:
         add("Set")
-    if re.search(r"全巻|完結|complete|completed|full set|all volumes", f"{text}\n{evidence}", flags=re.I):
+    if listing_facts.explicit_complete:
         add("Complete Series")
-    if re.search(r"初版|first edition", text, flags=re.I):
+    if listing_facts.first_edition:
         add("First Edition")
-    if re.search(r"限定|limited edition", text, flags=re.I):
+    if listing_facts.limited_edition:
         add("Limited Edition")
     if re.search(r"collector'?s edition", text, flags=re.I):
         add("Collector's Edition")
@@ -5668,7 +6015,7 @@ def infer_features(text: str, book_count: Optional[int], evidence: str) -> str:
         add("Full Color")
     if re.search(r"シュリンク|shrink wrap|shrinkwrapped|sealed", text, flags=re.I):
         add("Shrink Wrapped")
-    if re.search(r"帯付き|帯つき|帯あり", text, flags=re.I):
+    if listing_facts.obi_present:
         add("Obi Included")
     if looks_japanese_manga(text):
         add("Illustrated")
@@ -5678,7 +6025,7 @@ def infer_features(text: str, book_count: Optional[int], evidence: str) -> str:
 def infer_volume_range(text: str) -> str:
     source = normalize_count_text(text)
     patterns = [
-        r"(?<!\d)(\d{1,3})\s*(?:-|~|から)\s*(\d{1,3})\s*(?:巻|卷)",
+        r"(?:第\s*)?(\d{1,3})\s*(?:巻|卷)?\s*(?:-|~|から)\s*(?:第\s*)?(\d{1,3})\s*(?:巻|卷)",
         r"\b(?:vol(?:ume)?s?\.?)\s*(\d{1,3})\s*(?:-|~|to|through)\s*(\d{1,3})\b",
         r"\b(\d{1,3})\s*(?:-|~|to|through)\s*(\d{1,3})\s*(?:vol(?:ume)?s?|books?)\b",
     ]
@@ -6054,11 +6401,21 @@ def infer_specifics_with_notes(
     language = language or str(reference_values.get("language", ""))
     country = str(reference_values.get("country", "")) or "Japan"
     characters = str(series_reference.get("characters", "")) or str(reference_values.get("characters", ""))
+    listing_title_facts = extract_manga_listing_title_facts(text, book_count)
     features = infer_features(text, book_count, book_count_evidence)
     edition = infer_edition(text)
+    if edition == "First Edition" and not listing_title_facts.first_edition:
+        edition = ""
+    if edition == "Limited Edition" and not listing_title_facts.limited_edition:
+        edition = ""
     style = infer_style(text)
     intended_audience = infer_intended_audience(genre)
-    publication_year = infer_publication_year(text) or str(series_reference.get("publication_year", "")) or str(reference_values.get("publication_year", ""))
+    publication_year = (
+        listing_title_facts.edition_year
+        or infer_publication_year(text)
+        or str(series_reference.get("publication_year", ""))
+        or str(reference_values.get("publication_year", ""))
+    )
     era = infer_era(publication_year, text)
     isbn = infer_isbn(text)
     signed = "Yes" if re.search(r"サイン|signed|autograph", text, flags=re.I) else "No"
@@ -7558,6 +7915,7 @@ def apply_title_resolution_to_row(
     row["Title Resolution Candidates"] = " | ".join(result.candidates)
     row["Title Resolution Required"] = "Yes" if result.native_title else "No"
     row["Title Resolution Complete Volume Count"] = str(result.complete_volume_count or "")
+    row["Title Resolution Creators"] = " | ".join(result.creators)
     if result.status in {"manual", "grounded", "ai-auto"} and result.final_title:
         if title_col:
             row[title_col] = result.final_title
@@ -7596,7 +7954,18 @@ def apply_manual_title_override_to_frame(
                 original_title,
             ]
         )
-        final_title = compose_ebay_manga_title(resolved_series_title, evidence_text, book_count)
+        complete_count_value = parse_float_text(get_row_value(row, "Title Resolution Complete Volume Count"))
+        complete_volume_count = int(complete_count_value) if complete_count_value is not None else None
+        creators = unique_clean_strings(
+            re.split(r"\s*(?:\||;)\s*", get_row_value(row, "Title Resolution Creators"))
+        )
+        final_title = compose_ebay_manga_title(
+            resolved_series_title,
+            evidence_text,
+            book_count,
+            complete_volume_count,
+            creators,
+        )
         manual_result = CanonicalTitleResult(
             original_title=original_title,
             native_title=row_native,
@@ -7611,6 +7980,8 @@ def apply_manual_title_override_to_frame(
                 if final_title
                 else "80文字以内で安全なeBayタイトルを生成できませんでした。"
             ),
+            complete_volume_count=complete_volume_count,
+            creators=creators,
         )
         row = apply_title_resolution_to_row(row.copy(), manual_result, title_col=title_col)
         if final_title:
@@ -8165,6 +8536,15 @@ def process_dataframe(
                     book_count=book_count,
                 )
             merge_ai_specifics(specifics, ai_enrichment, specific_columns)
+            if title_resolution.creators:
+                add_specific_value(
+                    specifics.values,
+                    specifics.notes,
+                    specific_columns,
+                    ["Author", "Artist/Writer", "Writer", "Creator"],
+                    "; ".join(title_resolution.creators),
+                    "AniList exact native-title Story/Art staff",
+                )
             row, specifics_cleanup_notes = clear_non_english_specific_values(row, specific_columns)
             original_specifics_row = row.copy()
             row, specifics_fill_notes = apply_item_specifics_with_report(row, specifics.values, target_columns=specific_columns)
@@ -11499,6 +11879,7 @@ def render_title_resolution_panel(
     st,
     row: pd.Series,
     selected_index: int,
+    title_col: str = "Title",
 ) -> Optional[dict[str, str]]:
     native_title = get_row_value(row, "Native Series Title")
     status = get_row_value(row, "Title Resolution Status")
@@ -11509,6 +11890,8 @@ def render_title_resolution_panel(
     confidence = get_row_value(row, "Title Resolution Confidence") or "none"
     method = get_row_value(row, "Title Resolution Method") or "-"
     evidence = get_row_value(row, "Title Resolution Evidence") or "-"
+    final_ebay_title = get_row_value(row, title_col)
+    creators = get_row_value(row, "Title Resolution Creators")
     source_urls = [
         value.strip()
         for value in get_row_value(row, "Title Resolution Source URLs").split("|")
@@ -11523,6 +11906,12 @@ def render_title_resolution_panel(
         arrow_col.markdown("<div style='text-align:center;padding-top:1.65rem'>→</div>", unsafe_allow_html=True)
         after_col.caption("補正後")
         after_col.write(resolved_title)
+        if final_ebay_title:
+            st.markdown(f"**最終eBay Title（{len(final_ebay_title)}/80文字）**")
+            st.code(final_ebay_title, language="text")
+            st.caption("作品名と巻数を守り、初版・年・作者・帯を優先して80文字以内へ短縮しています。")
+        if creators:
+            st.caption(f"確認済み作者・原作者: {creators.replace('|', ' / ')}")
         status_text = f"{status or 'not-evaluated'} / {confidence}"
         if status.lower() == "ai-auto" and confidence.lower() == "low":
             st.warning(f"低信頼のAI候補です（{status_text}）。CSV出力はできますが、参照根拠を確認してください。")
@@ -11659,7 +12048,7 @@ def render_selected_preview(
 
     with detail_container:
         st.subheader(title)
-        title_override_action = render_title_resolution_panel(st, row, selected_index)
+        title_override_action = render_title_resolution_panel(st, row, selected_index, title_col)
         st.markdown(build_selected_decision_html(row, processed), unsafe_allow_html=True)
         if eligibility.lower() == "excluded":
             st.error(

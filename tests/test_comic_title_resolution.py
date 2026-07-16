@@ -31,6 +31,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     compose_ebay_manga_title,
     delete_local_title_override,
     delete_public_title_override,
+    extract_existing_english_series_title,
     extract_native_series_title,
     load_local_title_overrides,
     load_public_title_overrides,
@@ -115,6 +116,54 @@ class ComicTitleResolutionTest(unittest.TestCase):
             normalize_native_title_key("はたらく細菌Neo"),
         }
         self.assertEqual(len(identities), 3)
+
+    def test_native_title_extraction_prefers_quoted_series_over_edition_and_creator_metadata(self):
+        source = "＊「北斗の拳」1997年【初版本】帯付 第１巻~15巻完結セット 原哲夫、武論尊作"
+
+        extracted = extract_native_series_title(source)
+
+        self.assertEqual(extracted, "北斗の拳")
+
+    def test_native_title_extraction_rejects_quoted_listing_metadata(self):
+        cases = (
+            ("「全巻初版」北斗の拳 第1巻~15巻セット", "北斗の拳"),
+            ("「新品未開封」ワンピース 1~10巻セット", "ワンピース"),
+            ("「限定版」北斗の拳 第1巻~15巻", "北斗の拳"),
+            ("「1997年版」北斗の拳 第1巻~15巻", "北斗の拳"),
+            ("「原哲夫・武論尊」北斗の拳 第1巻~15巻", "北斗の拳"),
+        )
+
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(extract_native_series_title(source), expected)
+
+    def test_native_title_extraction_keeps_katakana_titles_with_middle_dot(self):
+        for title in ("ハイスクール・フリート", "ドラゴン・クエスト"):
+            with self.subTest(title=title):
+                self.assertEqual(extract_native_series_title(f"「{title}」全巻セット"), title)
+
+    def test_native_title_extraction_removes_labeled_creators_without_eating_series(self):
+        cases = (
+            ("原作 武論尊 北斗の拳 全巻セット", "北斗の拳"),
+            ("著者 尾田栄一郎 ワンピース 1-100巻", "ワンピース"),
+            ("北斗の拳 原作:武論尊 作画:原哲夫 第1巻~15巻", "北斗の拳"),
+            ("北斗の拳 原哲夫・武論尊作 第1巻~15巻", "北斗の拳"),
+            ("ワンピース 尾田栄一郎著 1~100巻", "ワンピース"),
+        )
+
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(extract_native_series_title(source), expected)
+
+    def test_existing_english_series_extraction_removes_edition_year_and_obi_metadata(self):
+        existing_title = (
+            "Fist of the North Star, 1997 First Edition with obi, "
+            "Volumes 1-15 Complete Set,"
+        )
+
+        extracted = extract_existing_english_series_title(existing_title)
+
+        self.assertEqual(extracted, "Fist of the North Star")
 
     def test_anilist_lookup_accepts_only_exact_native_identity_and_uses_cache(self):
         response = FakeJSONResponse(
@@ -214,6 +263,68 @@ class ComicTitleResolutionTest(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_anilist_lookup_keeps_story_and_art_staff_and_prefers_pen_name_alternative(self):
+        response = FakeJSONResponse(
+            {
+                "data": {
+                    "Page": {
+                        "media": [
+                            {
+                                "title": {
+                                    "native": "北斗の拳",
+                                    "english": "Fist of the North Star",
+                                    "romaji": "Hokuto no Ken",
+                                },
+                                "synonyms": [],
+                                "volumes": 27,
+                                "siteUrl": "https://anilist.co/manga/1359",
+                                "staff": {
+                                    "edges": [
+                                        {
+                                            "role": "Story",
+                                            "node": {
+                                                "name": {
+                                                    "full": "Yoshiyuki Okamura",
+                                                    "native": "武論尊",
+                                                    "alternative": ["Buronson"],
+                                                }
+                                            },
+                                        },
+                                        {
+                                            "role": "Art",
+                                            "node": {
+                                                "name": {
+                                                    "full": "Tetsuo Hara",
+                                                    "native": "原哲夫",
+                                                    "alternative": [],
+                                                }
+                                            },
+                                        },
+                                        {
+                                            "role": "Touch-up Art & Lettering (French)",
+                                            "node": {
+                                                "name": {
+                                                    "full": "Francois Jacques",
+                                                    "native": "",
+                                                    "alternative": [],
+                                                }
+                                            },
+                                        },
+                                    ]
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+        with patch("comic_ficp_streamlit_app.requests.post", return_value=response):
+            result = anilist_manga_title_lookup("北斗の拳")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.authors, ("Tetsuo Hara", "Buronson"))
+
     def test_resolver_two_stage_gemini_classifies_grounded_high_medium_and_ai_low(self):
         cases = [
             (
@@ -273,7 +384,10 @@ class ComicTitleResolutionTest(unittest.TestCase):
                 self.assertEqual(result.status, expected_status)
                 self.assertEqual(result.confidence, expected_confidence)
                 self.assertEqual(result.chosen_series_title, "Cells at Work: Bacteria!")
-                self.assertEqual(result.final_title, "Cells at Work: Bacteria! Volumes 1-5 Set Japanese")
+                self.assertEqual(
+                    result.final_title,
+                    "Cells at Work: Bacteria! Volumes 1-5 Set Haruyuki Yoshida Japanese",
+                )
                 self.assertEqual(result.grounded_prompt_count, 1)
                 self.assertEqual(result.usage.calls, 2)
                 grounded_call.assert_called_once()
@@ -332,8 +446,14 @@ class ComicTitleResolutionTest(unittest.TestCase):
                 run_cache=run_cache,
             )
 
-        self.assertEqual(first.final_title, "Cells at Work: Bacteria! Volumes 1-5 Set Japanese")
-        self.assertEqual(second.final_title, "Cells at Work: Bacteria! Volumes 2-7 Set Japanese")
+        self.assertEqual(
+            first.final_title,
+            "Cells at Work: Bacteria! Volumes 1-5 Set Haruyuki Yoshida Japanese",
+        )
+        self.assertEqual(
+            second.final_title,
+            "Cells at Work: Bacteria! Volumes 2-7 Set Haruyuki Yoshida Japanese",
+        )
         self.assertEqual(first.usage.calls, 2)
         self.assertEqual(first.grounded_prompt_count, 1)
         self.assertEqual(second.usage.calls, 0)
@@ -476,6 +596,16 @@ class ComicTitleResolutionTest(unittest.TestCase):
         self.assertEqual(title, "Cells at Work: Bacteria! Complete Set Volumes 1-7 Japanese")
         self.assertLessEqual(len(title), 80)
 
+    def test_title_composition_preserves_explicit_count_only_complete_edition(self):
+        title = compose_ebay_manga_title(
+            "Fist of the North Star",
+            "全15巻完結セット",
+            15,
+            complete_volume_count=27,
+        )
+
+        self.assertEqual(title, "Fist of the North Star Complete 15-Volume Set Japanese")
+
     def test_title_composition_shortens_suffix_without_cutting_series_name(self):
         series = "The Spectacular Adventures of Microscopic Heroes Manga"
 
@@ -485,6 +615,145 @@ class ComicTitleResolutionTest(unittest.TestCase):
         self.assertIn("1-12", title)
         self.assertTrue(title.endswith("Japanese"))
         self.assertLessEqual(len(title), 80)
+
+    def test_title_composition_prioritizes_first_edition_creators_and_obi_within_80_chars(self):
+        evidence = (
+            "＊「北斗の拳」1997年【初版本】帯付 第１巻~15巻完結セット 原哲夫、武論尊作 | "
+            "Fist of the North Star, 1997 First Edition with obi, Volumes 1-15 Complete Set,"
+        )
+
+        title = compose_ebay_manga_title(
+            "Fist of the North Star",
+            evidence,
+            15,
+            complete_volume_count=27,
+            creators=("Tetsuo Hara", "Buronson"),
+        )
+
+        self.assertEqual(
+            title,
+            "Fist of the North Star 1-15 Complete 1997 1st Ed Obi Tetsuo Hara Buronson JPN",
+        )
+        for important_term in (
+            "1-15",
+            "Complete",
+            "1997",
+            "1st Ed",
+            "Obi",
+            "Tetsuo Hara",
+            "Buronson",
+        ):
+            with self.subTest(important_term=important_term):
+                self.assertIn(important_term, title)
+        self.assertLessEqual(len(title), 80)
+
+    def test_title_composition_does_not_claim_obi_when_source_explicitly_says_none(self):
+        evidence = "「北斗の拳」1997年【初版本】帯なし 第1巻~15巻完結セット 原哲夫、武論尊作"
+
+        title = compose_ebay_manga_title(
+            "Fist of the North Star",
+            evidence,
+            15,
+            complete_volume_count=27,
+            creators=("Tetsuo Hara", "Buronson"),
+        )
+
+        self.assertIn("Complete", title)
+        self.assertIn("1997", title)
+        self.assertIn("1st Ed", title)
+        self.assertNotIn("Obi", title)
+        self.assertLessEqual(len(title), 80)
+
+    def test_title_composition_does_not_claim_complete_when_detected_count_conflicts(self):
+        evidence = "「北斗の拳」1997年【初版本】帯付 第1巻~15巻完結セット 原哲夫、武論尊作"
+
+        title = compose_ebay_manga_title(
+            "Fist of the North Star",
+            evidence,
+            14,
+            complete_volume_count=27,
+            creators=("Tetsuo Hara", "Buronson"),
+        )
+
+        self.assertIn("1-15", title)
+        self.assertNotIn("Complete", title)
+        self.assertLessEqual(len(title), 80)
+
+    def test_title_composition_rejects_negated_complete_claims(self):
+        for evidence in (
+            "Volumes 1-15 not complete, missing volume 8",
+            "Volumes 1-15 not a complete set",
+            "第1巻~15巻 完結ではありません",
+            "第1巻~15巻 全て揃っていない",
+        ):
+            with self.subTest(evidence=evidence):
+                title = compose_ebay_manga_title(
+                    "Fist of the North Star",
+                    evidence,
+                    15,
+                    complete_volume_count=15,
+                )
+                self.assertNotIn("Complete", title)
+
+    def test_title_composition_rejects_negated_limited_edition(self):
+        title = compose_ebay_manga_title(
+            "Example Manga",
+            "Volumes 1-5 Set, not a limited edition",
+            5,
+            complete_volume_count=10,
+        )
+
+        self.assertNotIn("Limited", title)
+        specifics = comic_app.infer_specifics_with_notes(
+            title,
+            "Volumes 1-5 Set, not a limited edition",
+            candidate_columns=["C:Edition", "C:Features"],
+            book_count=5,
+        )
+        self.assertNotEqual(specifics.values.get("C:Edition"), "Limited Edition")
+        self.assertNotIn("Limited Edition", specifics.values.get("C:Features", ""))
+
+    def test_title_composition_rejects_partial_first_edition_and_obi_claims(self):
+        evidence = "「北斗の拳」第1巻~15巻完結セット 初版は1巻のみ 1巻のみ帯付き 原哲夫、武論尊作"
+
+        title = compose_ebay_manga_title(
+            "Fist of the North Star",
+            evidence,
+            15,
+            complete_volume_count=27,
+            creators=("Tetsuo Hara", "Buronson"),
+        )
+
+        self.assertIn("Complete", title)
+        self.assertNotIn("1st Ed", title)
+        self.assertNotIn("First Edition", title)
+        self.assertNotIn("Obi", title)
+        specifics = comic_app.infer_specifics_with_notes(
+            title,
+            evidence,
+            candidate_columns=["C:Edition", "C:Features"],
+            book_count=15,
+            book_count_evidence=evidence,
+        )
+        self.assertNotEqual(specifics.values.get("C:Edition"), "First Edition")
+        self.assertNotIn("First Edition", specifics.values.get("C:Features", ""))
+        self.assertNotIn("Obi Included", specifics.values.get("C:Features", ""))
+
+    def test_edition_facts_also_fill_publication_year_and_features(self):
+        evidence = "「北斗の拳」1997年【初版本】帯付 第1巻~15巻完結セット 原哲夫、武論尊作"
+
+        specifics = comic_app.infer_specifics_with_notes(
+            "Fist of the North Star 1-15 Complete 1997 1st Ed Obi",
+            evidence,
+            candidate_columns=["C:Publication Year", "C:Features"],
+            book_count=15,
+            book_count_evidence=evidence,
+        )
+
+        self.assertEqual(specifics.values["C:Publication Year"], "1997")
+        self.assertIn("Complete Series", specifics.values["C:Features"])
+        self.assertIn("First Edition", specifics.values["C:Features"])
+        self.assertIn("Obi Included", specifics.values["C:Features"])
 
     def test_local_manual_override_round_trip_update_and_delete(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -549,6 +818,8 @@ class ComicTitleResolutionTest(unittest.TestCase):
                     "Title": "Working Bacteria Volumes 1-5 Set Japanese",
                     "C:Series": "Working Bacteria",
                     "C:Series Title": "Working Bacteria",
+                    "C:Author": "",
+                    "C:Artist/Writer": "",
                     "Original Title": "Working Bacteria Volumes 1-5 Set Japanese",
                     "Original C:Series": "Working Bacteria",
                     "Original C:Series Title": "Working Bacteria",
@@ -690,6 +961,7 @@ class ComicTitleResolutionTest(unittest.TestCase):
             method="Gemini Google Search grounding + structured selection",
             evidence="Insufficient eBay evidence; best available valid candidate.",
             grounded_prompt_count=1,
+            creators=["Haruyuki Yoshida"],
             usage=APIUsage(provider="gemini", model="gemini-2.5-flash-lite"),
         )
 
@@ -701,6 +973,9 @@ class ComicTitleResolutionTest(unittest.TestCase):
         self.assertEqual(processed.loc[0, "Title"], "Bacteria at Work Volumes 1-5 Set Japanese")
         self.assertEqual(processed.loc[0, "C:Series"], "Bacteria at Work")
         self.assertEqual(processed.loc[0, "C:Series Title"], "Bacteria at Work")
+        self.assertEqual(processed.loc[0, "C:Author"], "Haruyuki Yoshida")
+        self.assertEqual(processed.loc[0, "C:Artist/Writer"], "Haruyuki Yoshida")
+        self.assertEqual(processed.loc[0, "Title Resolution Creators"], "Haruyuki Yoshida")
         self.assertEqual(processed.loc[0, "Title Resolution Status"], "ai-auto")
         self.assertEqual(processed.loc[0, "Title Resolution Confidence"], "low")
         self.assertEqual(processed.loc[0, "Listing Eligibility"], "OK")
@@ -709,6 +984,8 @@ class ComicTitleResolutionTest(unittest.TestCase):
         self.assertEqual(export.loc[0, "Title"], "Bacteria at Work Volumes 1-5 Set Japanese")
         self.assertEqual(export.loc[0, "C:Series"], "Bacteria at Work")
         self.assertEqual(export.loc[0, "C:Series Title"], "Bacteria at Work")
+        self.assertEqual(export.loc[0, "C:Author"], "Haruyuki Yoshida")
+        self.assertEqual(export.loc[0, "C:Artist/Writer"], "Haruyuki Yoshida")
 
     def test_process_dataframe_excludes_required_failed_title_resolution(self):
         frame = pd.DataFrame(
