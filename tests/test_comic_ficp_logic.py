@@ -97,6 +97,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     process_dataframe,
     redact_sensitive_text,
     resolve_preflight_selected_position,
+    render_product_selection_dataframe,
     authenticate_public_user,
     public_saved_api_key_exists,
     save_api_key,
@@ -989,6 +990,30 @@ with download_slot.container():
         self.assertEqual(fake_st.session_state["view"], "選択商品")
         self.assertNotIn(PREFLIGHT_PENDING_SELECTION_KEY, fake_st.session_state)
 
+    def test_native_product_selection_uses_session_state_without_browser_navigation(self):
+        fake_st = FakeStreamlit()
+        fake_st.dataframe = Mock(return_value={"selection": {"cells": [[1, "Title"]]}})
+        fake_st.rerun = Mock()
+        mapping_table = pd.DataFrame(
+            [
+                {"Position": "0", "Title": "First"},
+                {"Position": "2", "Title": "Third"},
+            ]
+        )
+
+        render_product_selection_dataframe(
+            fake_st,
+            mapping_table,
+            mapping_table[["Title"]],
+            key="test_selector",
+            column_config={},
+        )
+
+        self.assertEqual(fake_st.session_state[PREFLIGHT_PENDING_SELECTION_KEY], 2)
+        fake_st.rerun.assert_called_once_with()
+        self.assertEqual(fake_st.dataframe.call_args.kwargs["selection_mode"], "single-cell")
+        self.assertEqual(fake_st.dataframe.call_args.kwargs["on_select"], "rerun")
+
     def test_preflight_uses_native_selection_and_large_rows_without_query_links(self):
         source = (ROOT / "comic_ficp_streamlit_app.py").read_text(encoding="utf-8")
 
@@ -997,6 +1022,57 @@ with download_slot.container():
         self.assertIn('"画像（クリックで詳細）"', source)
         self.assertIn('"Title（クリックで商品詳細）"', source)
         self.assertNotIn("build_clickable_preflight_row_html", source)
+
+    def test_all_product_lists_use_session_safe_native_selection(self):
+        source = (ROOT / "comic_ficp_streamlit_app.py").read_text(encoding="utf-8")
+
+        for widget_key in (
+            "comic_ficp_preflight_selector",
+            "comic_ficp_review_selector",
+            "comic_ficp_diagnostic_selector_",
+            "comic_ficp_exclusion_selector",
+        ):
+            self.assertIn(widget_key, source)
+        self.assertNotIn("def build_select_product_href", source)
+        self.assertNotIn("build_clickable_review_row_html", source)
+        self.assertNotIn("build_clickable_diagnostic_row_html", source)
+        self.assertNotIn("build_clickable_exclusion_row_html", source)
+        self.assertNotIn('href="?comic_ficp_select=', source)
+
+    def test_review_diagnostic_and_exclusion_tables_preserve_source_positions(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "Title": "First manga",
+                    "Processing Result": "成功",
+                    "Needs Review": "No",
+                    "Listing Eligibility": "OK",
+                },
+                {
+                    "Title": "Excluded manga",
+                    "Processing Result": "出品除外",
+                    "Needs Review": "Yes",
+                    "Listing Eligibility": "Excluded",
+                    "Exclusion Reason": "Missing volume",
+                },
+                {
+                    "Title": "Third manga",
+                    "Processing Result": "成功",
+                    "Needs Review": "No",
+                    "Listing Eligibility": "OK",
+                },
+            ],
+            index=[10, 20, 30],
+        )
+
+        review_table = build_review_table(frame, "Title", "Product URL")
+        diagnostic_table = build_processing_diagnostic_table(frame, "Title", "Product URL")
+        exclusion_table = build_exclusion_table(frame, "Title", "Product URL")
+
+        self.assertEqual(review_table["Position"].tolist(), ["0", "1", "2"])
+        self.assertEqual(diagnostic_table["Position"].tolist(), ["0", "1", "2"])
+        self.assertEqual(exclusion_table["Position"].tolist(), ["1"])
+        self.assertEqual(resolve_preflight_selected_position(exclusion_table, [[0, "Title"]]), 1)
 
     def test_build_export_dataframe_rollup_skips_bad_price_or_missing_shipping(self):
         frame = pd.DataFrame(

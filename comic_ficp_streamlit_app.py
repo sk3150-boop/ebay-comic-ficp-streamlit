@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-item-details-left-v7"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-session-safe-selection-v8"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -10620,10 +10620,6 @@ def apply_query_selected_row(st, row_options: list[int], selected_index_key: str
         pass
 
 
-def build_select_product_href(position: int) -> str:
-    return f"?comic_ficp_select={int(position)}"
-
-
 def resolve_preflight_selected_position(table: pd.DataFrame, selected_items: object) -> Optional[int]:
     if not isinstance(selected_items, (list, tuple)) or not selected_items:
         return None
@@ -10643,6 +10639,35 @@ def resolve_preflight_selected_position(table: pd.DataFrame, selected_items: obj
     except (TypeError, ValueError):
         return None
     return source_position if source_position >= 0 else None
+
+
+def render_product_selection_dataframe(
+    st,
+    mapping_table: pd.DataFrame,
+    display_table: pd.DataFrame,
+    *,
+    key: str,
+    column_config: dict[str, object],
+) -> None:
+    selection_event = st.dataframe(
+        display_table,
+        use_container_width=True,
+        hide_index=True,
+        height=REVIEW_TABLE_HEIGHT_PX,
+        row_height=REVIEW_TABLE_ROW_HEIGHT_PX,
+        on_select="rerun",
+        selection_mode="single-cell",
+        key=key,
+        column_config=column_config,
+    )
+    try:
+        selected_cells = selection_event.selection.cells
+    except AttributeError:
+        selected_cells = selection_event.get("selection", {}).get("cells", []) if isinstance(selection_event, dict) else []
+    selected_position = resolve_preflight_selected_position(mapping_table, selected_cells)
+    if selected_position is not None:
+        st.session_state[PREFLIGHT_PENDING_SELECTION_KEY] = selected_position
+        st.rerun()
 
 
 def render_clickable_preflight_table(st, table: pd.DataFrame) -> None:
@@ -10668,14 +10693,10 @@ def render_clickable_preflight_table(st, table: pd.DataFrame) -> None:
     ]
     display_table = visible_table[display_columns].copy()
     display_table["Title"] = display_table["Title"].map(lambda value: f"↗ {value}")
-    selection_event = st.dataframe(
+    render_product_selection_dataframe(
+        st,
+        visible_table,
         display_table,
-        use_container_width=True,
-        hide_index=True,
-        height=REVIEW_TABLE_HEIGHT_PX,
-        row_height=REVIEW_TABLE_ROW_HEIGHT_PX,
-        on_select="rerun",
-        selection_mode="single-cell",
         key="comic_ficp_preflight_selector",
         column_config={
             "No": st.column_config.TextColumn("No", width=56),
@@ -10701,77 +10722,62 @@ def render_clickable_preflight_table(st, table: pd.DataFrame) -> None:
             "Warnings": st.column_config.TextColumn("注意", width=260),
         },
     )
-    try:
-        selected_cells = selection_event.selection.cells
-    except AttributeError:
-        selected_cells = selection_event.get("selection", {}).get("cells", []) if isinstance(selection_event, dict) else []
-    selected_position = resolve_preflight_selected_position(visible_table, selected_cells)
-    if selected_position is not None:
-        st.session_state[PREFLIGHT_PENDING_SELECTION_KEY] = selected_position
-        st.rerun()
 
 
 def render_clickable_review_table(st, frame: pd.DataFrame, title_col: str, image_col: str, url_col: str) -> None:
-    st.markdown('<div class="click-hint">画像をクリックすると、その商品を「選択商品」で開きます。</div>', unsafe_allow_html=True)
-    rows_html = [
-        '<div class="clickable-row header">'
-        '<div class="clickable-cell">No</div>'
-        '<div class="clickable-cell">画像</div>'
-        '<div class="clickable-cell">Title</div>'
-        '<div class="clickable-cell">Books</div>'
-        '<div class="clickable-cell">課金重量</div>'
-        '<div class="clickable-cell">送料USD</div>'
-        '<div class="clickable-cell">出品判定</div>'
-        '<div class="clickable-cell">取得状態</div>'
-        "</div>"
-    ]
-    for position, (_, row) in enumerate(frame.iterrows()):
-        rows_html.append(build_clickable_review_row_html(position, row, title_col, image_col, url_col))
-    st.markdown(f'<div class="clickable-list">{"".join(rows_html)}</div>', unsafe_allow_html=True)
-
-
-def build_clickable_review_row_html(position: int, row: pd.Series, title_col: str, image_col: str, url_col: str) -> str:
-    image_url = build_table_image_url(row, image_col)
-    href = build_select_product_href(position)
-    if image_url:
-        image_html = (
-            f'<a class="clickable-image-link" href="{html_escape(href)}" target="_self" title="この商品を選択商品で開く">'
-            f'<img src="{html_escape(image_url)}" alt="{html_escape(get_row_value(row, title_col) or "商品画像")}">'
-            "</a>"
+    st.caption("画像またはタイトルを含む商品行をクリックすると、その商品を「選択商品」で開きます。")
+    visible_table = build_review_table(frame, title_col, url_col, image_col).reset_index(drop=True)
+    if visible_table.empty:
+        st.info("表示できる処理結果はありません。")
+        return
+    display_columns = ["No", "Image", "Title", "Books", "Billable kg", "Shipping USD", "Eligibility", "Status"]
+    display_table = visible_table[display_columns].copy()
+    display_table["Title"] = display_table["Title"].map(lambda value: f"↗ {value}")
+    display_table["Billable kg"] = display_table["Billable kg"].map(format_weight_display)
+    display_table["Shipping USD"] = display_table["Shipping USD"].map(lambda value: f"${value}" if value else "-")
+    display_table["Status"] = visible_table.apply(
+        lambda row: " / ".join(
+            part
+            for part in (
+                get_row_value(row, "Status"),
+                get_row_value(row, "Book Count Status")
+                if get_row_value(row, "Book Count Status").lower() not in {"", "ok"}
+                else "",
+            )
+            if part
         )
-    else:
-        image_html = (
-            f'<a class="clickable-image-link" href="{html_escape(href)}" target="_self" title="この商品を選択商品で開く">'
-            '<div class="clickable-image-placeholder">画像なし</div>'
-            "</a>"
-        )
-    title = first_nonblank(get_row_value(row, title_col), get_row_value(row, "C:Book Title"), get_row_value(row, "Source Listing Title"))
-    billable_weight = format_weight_display(get_row_value(row, "Billable Weight kg"))
-    shipping_usd = get_row_value(row, "FICP Shipping USD")
-    shipping_text = f"${shipping_usd}" if shipping_usd else "-"
-    eligibility = get_row_value(row, "Listing Eligibility") or "-"
-    status_parts = [get_row_value(row, "Scrape Status")]
-    book_count_status = get_row_value(row, "Book Count Status")
-    if book_count_status and book_count_status.lower() != "ok":
-        status_parts.append(book_count_status)
-    status = " / ".join(part for part in status_parts if part) or "-"
-    return (
-        '<div class="clickable-row">'
-        f'<div class="clickable-cell">{position + 1}</div>'
-        f'<div class="clickable-cell">{image_html}</div>'
-        f'<div class="clickable-cell"><a href="{html_escape(href)}" target="_self">{html_escape(title or "-")}</a></div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "Detected Book Count") or "-")}</div>'
-        f'<div class="clickable-cell">{html_escape(billable_weight)}</div>'
-        f'<div class="clickable-cell">{html_escape(shipping_text)}</div>'
-        f'<div class="clickable-cell">{html_escape(eligibility)}</div>'
-        f'<div class="clickable-cell">{html_escape(status)}</div>'
-        "</div>"
+        or "-",
+        axis=1,
+    )
+    render_product_selection_dataframe(
+        st,
+        visible_table,
+        display_table,
+        key="comic_ficp_review_selector",
+        column_config={
+            "No": st.column_config.TextColumn("No", width=56),
+            "Image": st.column_config.ImageColumn(
+                "画像（クリックで詳細）",
+                width=REVIEW_TABLE_IMAGE_WIDTH_PX,
+                help="商品行をクリックすると選択商品で開きます。",
+            ),
+            "Title": st.column_config.TextColumn(
+                "Title（クリックで商品詳細）",
+                width=420,
+                help="商品行をクリックすると選択商品で開きます。",
+            ),
+            "Books": st.column_config.TextColumn("冊数", width=76),
+            "Billable kg": st.column_config.TextColumn("課金重量", width=110),
+            "Shipping USD": st.column_config.TextColumn("送料USD", width=100),
+            "Eligibility": st.column_config.TextColumn("出品判定", width=100),
+            "Status": st.column_config.TextColumn("取得状態", width=220),
+        },
     )
 
 
 def build_processing_diagnostic_table(frame: pd.DataFrame, title_col: str, url_col: str, image_col: str = "") -> pd.DataFrame:
     rows: list[dict[str, str]] = []
-    for idx, row in frame.iterrows():
+    for position, (_, row) in enumerate(frame.iterrows()):
         diagnostics = diagnose_processed_row(row)
         result = get_row_value(row, "Processing Result") or diagnostics["result"]
         severity = get_row_value(row, "Processing Severity") or diagnostics["severity"]
@@ -10780,7 +10786,8 @@ def build_processing_diagnostic_table(frame: pd.DataFrame, title_col: str, url_c
         diagnostic_text = redact_sensitive_text(get_row_value(row, "Processing Diagnostics") or diagnostics["diagnostics"])
         rows.append(
             {
-                "No": str(idx + 1),
+                "Position": str(position),
+                "No": str(position + 1),
                 "Image": build_table_image_url(row, image_col),
                 "Title": first_nonblank(
                     get_row_value(row, title_col),
@@ -10806,17 +10813,6 @@ def build_processing_diagnostic_table(frame: pd.DataFrame, title_col: str, url_c
             }
         )
     return pd.DataFrame(rows)
-
-
-def diagnostic_badge_class(result: str) -> str:
-    lowered = (result or "").lower()
-    if "成功" in result or lowered == "ok":
-        return "diagnostic-ok"
-    if "除外" in result or "excluded" in lowered:
-        return "diagnostic-excluded"
-    if "未処理" in result:
-        return "diagnostic-pending"
-    return "diagnostic-warning"
 
 
 def diagnostic_matches_filter(diagnostics: dict[str, str], filter_label: str) -> bool:
@@ -10863,7 +10859,7 @@ def render_processing_diagnostics(st, frame: pd.DataFrame, title_col: str, image
         label_visibility="collapsed",
         key="comic_ficp_diagnostic_filter",
     )
-    render_clickable_diagnostic_table(st, frame, title_col, image_col, url_col, filter_label)
+    render_clickable_diagnostic_table(st, table, filter_label)
 
 
 def render_ebay_preflight_check(st, active_frame: pd.DataFrame, export_frame: pd.DataFrame, title_col: str) -> None:
@@ -10904,94 +10900,76 @@ def render_ebay_preflight_check(st, active_frame: pd.DataFrame, export_frame: pd
 
 def render_clickable_diagnostic_table(
     st,
-    frame: pd.DataFrame,
-    title_col: str,
-    image_col: str,
-    url_col: str,
+    table: pd.DataFrame,
     filter_label: str,
 ) -> None:
-    st.markdown(
-        '<div class="click-hint">画像やタイトルをクリックすると、その商品を「選択商品」で開きます。確認必要の理由を優先して表示します。</div>',
-        unsafe_allow_html=True,
+    st.caption("画像またはタイトルを含む商品行をクリックすると、その商品を「選択商品」で開きます。")
+    visible_mask = table.apply(
+        lambda row: diagnostic_matches_filter(
+            {
+                "result": get_row_value(row, "Result"),
+                "needs_review": get_row_value(row, "Needs Review"),
+            },
+            filter_label,
+        ),
+        axis=1,
     )
-    rows_html = [
-        '<div class="diagnostic-row header">'
-        '<div class="clickable-cell">No</div>'
-        '<div class="clickable-cell">画像</div>'
-        '<div class="clickable-cell">Title</div>'
-        '<div class="clickable-cell">結果</div>'
-        '<div class="clickable-cell">送料/冊数</div>'
-        '<div class="clickable-cell">要確認理由</div>'
-        '<div class="clickable-cell">診断メモ</div>'
-        "</div>"
-    ]
-    visible_count = 0
-    for position, (_, row) in enumerate(frame.iterrows()):
-        diagnostics = diagnose_processed_row(row)
-        diagnostics["result"] = get_row_value(row, "Processing Result") or diagnostics["result"]
-        diagnostics["severity"] = get_row_value(row, "Processing Severity") or diagnostics["severity"]
-        diagnostics["needs_review"] = get_row_value(row, "Needs Review") or diagnostics["needs_review"]
-        diagnostics["review_reason"] = redact_sensitive_text(get_row_value(row, "Needs Review Reason") or diagnostics["review_reason"])
-        diagnostics["diagnostics"] = redact_sensitive_text(get_row_value(row, "Processing Diagnostics") or diagnostics["diagnostics"])
-        if not diagnostic_matches_filter(diagnostics, filter_label):
-            continue
-        rows_html.append(build_clickable_diagnostic_row_html(position, row, title_col, image_col, diagnostics))
-        visible_count += 1
-    if visible_count == 0:
+    visible_table = table[visible_mask].reset_index(drop=True)
+    if visible_table.empty:
         st.info("この条件に当てはまる行はありません。")
         return
-    st.markdown(f'<div class="clickable-list">{"".join(rows_html)}</div>', unsafe_allow_html=True)
-
-
-def build_clickable_diagnostic_row_html(
-    position: int,
-    row: pd.Series,
-    title_col: str,
-    image_col: str,
-    diagnostics: dict[str, str],
-) -> str:
-    image_url = build_table_image_url(row, image_col)
-    href = build_select_product_href(position)
-    title = first_nonblank(get_row_value(row, title_col), get_row_value(row, "Source Listing Title"), get_row_value(row, "C:Book Title"))
-    if image_url:
-        image_html = (
-            f'<a class="clickable-image-link" href="{html_escape(href)}" target="_self" title="この商品を選択商品で開く">'
-            f'<img src="{html_escape(image_url)}" alt="{html_escape(title or "商品画像")}">'
-            "</a>"
-        )
-    else:
-        image_html = (
-            f'<a class="clickable-image-link" href="{html_escape(href)}" target="_self" title="この商品を選択商品で開く">'
-            '<div class="clickable-image-placeholder">画像なし</div>'
-            "</a>"
-        )
-    shipping = get_row_value(row, "FICP Shipping USD")
-    books = get_row_value(row, "Detected Book Count")
-    shipping_books = f"${shipping or '-'} / {books or '-'}冊"
-    result = diagnostics["result"]
-    badge_class = diagnostic_badge_class(result)
-    review_reason = diagnostics["review_reason"] or "-"
-    diagnostic_text = diagnostics["diagnostics"] or "-"
-    return (
-        '<div class="diagnostic-row">'
-        f'<div class="clickable-cell">{position + 1}</div>'
-        f'<div class="clickable-cell">{image_html}</div>'
-        f'<div class="clickable-cell"><a href="{html_escape(href)}" target="_self">{html_escape(title or "-")}</a></div>'
-        f'<div class="clickable-cell"><span class="diagnostic-badge {badge_class}">{html_escape(result)}</span></div>'
-        f'<div class="clickable-cell">{html_escape(shipping_books)}</div>'
-        f'<div class="clickable-cell">{html_escape(review_reason)}</div>'
-        f'<div class="clickable-cell">{html_escape(diagnostic_text)}</div>'
-        "</div>"
+    result_prefixes = {"成功": "✓ ", "確認必要": "! ", "出品除外": "× ", "未処理": "… "}
+    display_table = visible_table.copy()
+    display_table["Title"] = display_table["Title"].map(lambda value: f"↗ {value}")
+    display_table["Result Display"] = display_table["Result"].map(
+        lambda value: f"{result_prefixes.get(str(value), '')}{value}"
+    )
+    display_table["Shipping / Books"] = display_table.apply(
+        lambda row: f"${get_row_value(row, 'Shipping USD') or '-'} / {get_row_value(row, 'Books') or '-'}冊",
+        axis=1,
+    )
+    display_columns = [
+        "No",
+        "Image",
+        "Title",
+        "Result Display",
+        "Shipping / Books",
+        "Review Reason",
+        "Diagnostics",
+    ]
+    render_product_selection_dataframe(
+        st,
+        visible_table,
+        display_table[display_columns],
+        key=f"comic_ficp_diagnostic_selector_{normalize_key(filter_label) or 'all'}",
+        column_config={
+            "No": st.column_config.TextColumn("No", width=56),
+            "Image": st.column_config.ImageColumn(
+                "画像（クリックで詳細）",
+                width=REVIEW_TABLE_IMAGE_WIDTH_PX,
+                help="商品行をクリックすると選択商品で開きます。",
+            ),
+            "Title": st.column_config.TextColumn(
+                "Title（クリックで商品詳細）",
+                width=420,
+                help="商品行をクリックすると選択商品で開きます。",
+            ),
+            "Result Display": st.column_config.TextColumn("結果", width=110),
+            "Shipping / Books": st.column_config.TextColumn("送料/冊数", width=120),
+            "Review Reason": st.column_config.TextColumn("要確認理由", width=280),
+            "Diagnostics": st.column_config.TextColumn("診断メモ", width=300),
+        },
     )
 
 
 def build_review_table(frame: pd.DataFrame, title_col: str, url_col: str, image_col: str = "") -> pd.DataFrame:
     rows: list[dict[str, str]] = []
-    for idx, row in frame.iterrows():
+    for position, (_, row) in enumerate(frame.iterrows()):
         source_url = display_source_url(row, url_col)
         rows.append(
             {
-                "No": str(idx + 1),
+                "Position": str(position),
+                "No": str(position + 1),
                 "Image": build_table_image_url(row, image_col),
                 "Title": first_nonblank(get_row_value(row, title_col), get_row_value(row, "C:Book Title")),
                 "Books": get_row_value(row, "Detected Book Count"),
@@ -11027,12 +11005,13 @@ def build_review_table(frame: pd.DataFrame, title_col: str, url_col: str, image_
 
 def build_exclusion_table(frame: pd.DataFrame, title_col: str, url_col: str, image_col: str = "") -> pd.DataFrame:
     rows: list[dict[str, str]] = []
-    for idx, row in frame.iterrows():
+    for position, (_, row) in enumerate(frame.iterrows()):
         if get_row_value(row, "Listing Eligibility").lower() != "excluded":
             continue
         rows.append(
             {
-                "No": str(idx + 1),
+                "Position": str(position),
+                "No": str(position + 1),
                 "Image": build_table_image_url(row, image_col),
                 "Title": first_nonblank(
                     get_row_value(row, title_col),
@@ -11063,53 +11042,36 @@ def render_exclusion_candidates(
         st.info("除外候補はまだありません。欠巻・欠品・欠損の可能性がある商品を検出すると、ここに表示します。")
         return
     st.warning(f"除外候補 {len(table)} 件があります。これらはダウンロードCSVから自動で削除されます。")
-    render_clickable_exclusion_table(st, frame, title_col, image_col)
+    render_clickable_exclusion_table(st, table)
 
 
-def render_clickable_exclusion_table(st, frame: pd.DataFrame, title_col: str, image_col: str) -> None:
-    st.markdown('<div class="click-hint">画像をクリックすると、その除外候補を「選択商品」で開きます。</div>', unsafe_allow_html=True)
-    rows_html = [
-        '<div class="clickable-row header">'
-        '<div class="clickable-cell">No</div>'
-        '<div class="clickable-cell">画像</div>'
-        '<div class="clickable-cell">Title</div>'
-        '<div class="clickable-cell">理由</div>'
-        '<div class="clickable-cell" style="grid-column: span 3;">根拠</div>'
-        '<div class="clickable-cell">取得状態</div>'
-        "</div>"
-    ]
-    for position, (_, row) in enumerate(frame.iterrows()):
-        if get_row_value(row, "Listing Eligibility").lower() != "excluded":
-            continue
-        rows_html.append(build_clickable_exclusion_row_html(position, row, title_col, image_col))
-    st.markdown(f'<div class="clickable-list">{"".join(rows_html)}</div>', unsafe_allow_html=True)
-
-
-def build_clickable_exclusion_row_html(position: int, row: pd.Series, title_col: str, image_col: str) -> str:
-    image_url = build_table_image_url(row, image_col)
-    href = build_select_product_href(position)
-    if image_url:
-        image_html = (
-            f'<a class="clickable-image-link" href="{html_escape(href)}" target="_self" title="この除外候補を選択商品で開く">'
-            f'<img src="{html_escape(image_url)}" alt="{html_escape(get_row_value(row, title_col) or "商品画像")}">'
-            "</a>"
-        )
-    else:
-        image_html = (
-            f'<a class="clickable-image-link" href="{html_escape(href)}" target="_self" title="この除外候補を選択商品で開く">'
-            '<div class="clickable-image-placeholder">画像なし</div>'
-            "</a>"
-        )
-    title = first_nonblank(get_row_value(row, title_col), get_row_value(row, "Source Listing Title"), get_row_value(row, "C:Book Title"))
-    return (
-        '<div class="clickable-row">'
-        f'<div class="clickable-cell">{position + 1}</div>'
-        f'<div class="clickable-cell">{image_html}</div>'
-        f'<div class="clickable-cell"><a href="{html_escape(href)}" target="_self">{html_escape(title or "-")}</a></div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "Exclusion Reason") or "-")}</div>'
-        f'<div class="clickable-cell" style="grid-column: span 3;">{html_escape(get_row_value(row, "Exclusion Evidence") or "-")}</div>'
-        f'<div class="clickable-cell">{html_escape(get_row_value(row, "Scrape Status") or "-")}</div>'
-        "</div>"
+def render_clickable_exclusion_table(st, table: pd.DataFrame) -> None:
+    st.caption("画像またはタイトルを含む除外候補行をクリックすると、その商品を「選択商品」で開きます。")
+    visible_table = table.reset_index(drop=True)
+    display_columns = ["No", "Image", "Title", "Reason", "Evidence", "Status"]
+    display_table = visible_table[display_columns].copy()
+    display_table["Title"] = display_table["Title"].map(lambda value: f"↗ {value}")
+    render_product_selection_dataframe(
+        st,
+        visible_table,
+        display_table,
+        key="comic_ficp_exclusion_selector",
+        column_config={
+            "No": st.column_config.TextColumn("No", width=56),
+            "Image": st.column_config.ImageColumn(
+                "画像（クリックで詳細）",
+                width=REVIEW_TABLE_IMAGE_WIDTH_PX,
+                help="除外候補行をクリックすると選択商品で開きます。",
+            ),
+            "Title": st.column_config.TextColumn(
+                "Title（クリックで商品詳細）",
+                width=420,
+                help="除外候補行をクリックすると選択商品で開きます。",
+            ),
+            "Reason": st.column_config.TextColumn("理由", width=260),
+            "Evidence": st.column_config.TextColumn("根拠", width=360),
+            "Status": st.column_config.TextColumn("取得状態", width=220),
+        },
     )
 
 
