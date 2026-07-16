@@ -1014,6 +1014,25 @@ with download_slot.container():
         self.assertEqual(fake_st.dataframe.call_args.kwargs["selection_mode"], "single-cell")
         self.assertEqual(fake_st.dataframe.call_args.kwargs["on_select"], "rerun")
 
+    def test_native_product_selection_does_not_rerun_without_valid_selection(self):
+        mapping_table = pd.DataFrame([{"Position": "0", "Title": "First"}])
+        for selected_cells in ([], [[2, "Title"]], [["invalid", "Title"]]):
+            with self.subTest(selected_cells=selected_cells):
+                fake_st = FakeStreamlit()
+                fake_st.dataframe = Mock(return_value={"selection": {"cells": selected_cells}})
+                fake_st.rerun = Mock()
+
+                render_product_selection_dataframe(
+                    fake_st,
+                    mapping_table,
+                    mapping_table[["Title"]],
+                    key="test_selector",
+                    column_config={},
+                )
+
+                self.assertNotIn(PREFLIGHT_PENDING_SELECTION_KEY, fake_st.session_state)
+                fake_st.rerun.assert_not_called()
+
     def test_preflight_uses_native_selection_and_large_rows_without_query_links(self):
         source = (ROOT / "comic_ficp_streamlit_app.py").read_text(encoding="utf-8")
 
