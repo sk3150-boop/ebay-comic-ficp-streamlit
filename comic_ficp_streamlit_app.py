@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-canonical-title-v6"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-07-16-item-details-left-v7"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -6825,7 +6825,7 @@ def build_description_append(
 
     lines = [
         AUTOFILL_MARKER_START,
-        '<div style="margin-top:16px; padding-top:12px; border-top:1px solid #d0d5dd;">',
+        '<div style="margin-top:16px; padding-top:12px; border-top:1px solid #d0d5dd; text-align:left;">',
         "<p><strong>Item details</strong></p>",
         "<ul>",
     ]

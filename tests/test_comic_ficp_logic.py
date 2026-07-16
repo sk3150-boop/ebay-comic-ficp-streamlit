@@ -1446,6 +1446,25 @@ with download_slot.container():
         self.assertIn("この漫画セットは1〜5巻の5冊です。", japanese)
         self.assertIsNone(re.search(r"[A-Za-z]{3,}", japanese))
 
+    def test_generated_item_details_are_left_aligned(self):
+        addition = build_description_append(
+            title="",
+            book_count=5,
+            evidence="全5巻",
+            weight_kg=None,
+            ficp_charge=None,
+            shipping_usd=None,
+            source_url="",
+            buyer_detail_notes=["Set includes volumes 1-5."],
+        )
+
+        soup = BeautifulSoup(addition, "html.parser")
+        heading = soup.find("strong", string="Item details")
+        self.assertIsNotNone(heading)
+        details_container = heading.find_parent("div")
+        self.assertIsNotNone(details_container)
+        self.assertRegex(details_container.get("style", ""), r"(?i)text-align\s*:\s*left")
+
     def test_product_overview_marks_matching_complete_series_once(self):
         notes = ["Complete set of 15 volumes.", "Set includes volumes 1-15."]
         items = build_buyer_description_items(15, notes)
@@ -1611,7 +1630,7 @@ with download_slot.container():
             buyer_detail_notes=["All volumes are first editions."],
         )
         template = (
-            '<div class="listing-template">'
+            '<div class="listing-template" style="text-align:center;">'
             '<div class="section-heading">Product Overview</div>'
             '<div class="overview-body"><p>Authentic Japanese merchandise.</p></div>'
             '<div class="section-heading">Payment Details</div>'
@@ -1626,6 +1645,14 @@ with download_slot.container():
         self.assertLess(result.index("Authentic Japanese merchandise."), result.index(AUTOFILL_MARKER_START))
         self.assertLess(result.index(AUTOFILL_MARKER_START), result.index("Payment Details"))
         self.assertEqual(result.count(AUTOFILL_MARKER_START), 1)
+        soup = BeautifulSoup(result, "html.parser")
+        overview_heading = soup.find(string="Product Overview").parent
+        self.assertRegex(overview_heading.parent.get("style", ""), r"(?i)text-align\s*:\s*center")
+        details_heading = soup.find("strong", string="Item details")
+        self.assertRegex(
+            details_heading.find_parent("div").get("style", ""),
+            r"(?i)text-align\s*:\s*left",
+        )
 
     def test_description_inserted_inside_product_overview_with_cdata_wrapper(self):
         addition = build_description_append(
