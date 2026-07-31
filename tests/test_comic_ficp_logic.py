@@ -1764,8 +1764,8 @@ st.caption(
         self.assertEqual(by_label["送料USD"]["sub"], "JPY 8,999円")
 
     def test_default_fallback_weights_are_conservative(self):
-        self.assertEqual(DEFAULT_BOOK_WEIGHT_G, 200)
-        self.assertEqual(DEFAULT_PACKAGING_WEIGHT_KG, 0.60)
+        self.assertEqual(DEFAULT_BOOK_WEIGHT_G, 300)
+        self.assertEqual(DEFAULT_PACKAGING_WEIGHT_KG, 0.80)
 
     def test_default_us_ficp_zone_is_western_us_zone_e(self):
         self.assertEqual(DEFAULT_FICP_ZONE, "E")
@@ -3673,7 +3673,7 @@ st.caption(
         self.assertEqual(result.loc[0, "Inferred Source URL"], "https://jp.mercari.com/item/m12345678901")
         self.assertEqual(result.loc[0, "Source URL Confidence"], "provided")
         self.assertEqual(result.loc[0, "FICP US Zone"], "U.S. western region (Zone E)")
-        self.assertEqual(result.loc[0, "FICP Shipping JPY"], "3199")
+        self.assertEqual(result.loc[0, "FICP Shipping JPY"], "3698")
 
     def test_process_dataframe_replaces_non_english_series_from_previous_autofill(self):
         frame = pd.DataFrame(
