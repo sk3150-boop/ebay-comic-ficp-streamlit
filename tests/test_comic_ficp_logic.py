@@ -37,6 +37,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     PUBLIC_SESSION_USER_KEY,
     ProcessingConfig,
     ReferenceBookCountResult,
+    TRIAL_PROCESSING_BATCH_SIZE,
     append_description,
     append_unique_buyer_notes,
     apply_usd_jpy_exchange_rate_to_session_state,
@@ -123,6 +124,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     save_processed_dataframe_cache,
     save_uploaded_csv_cache,
     sanitize_description_html,
+    select_trial_batch_indices,
     summarize_ui_rows,
     summarize_api_costs,
     translate_description_added_text_to_japanese,
@@ -450,9 +452,20 @@ with download_slot.container():
     def test_default_export_safety_limits(self):
         self.assertEqual(DEFAULT_MAX_BOOK_COUNT_FOR_EXPORT, 40)
         self.assertEqual(DEFAULT_FREE_SHIPPING_MARKUP_PERCENT, 30.0)
+        self.assertEqual(TRIAL_PROCESSING_BATCH_SIZE, 5)
         self.assertEqual(ProcessingConfig().max_book_count_for_export, 40)
         self.assertTrue(FreeShippingRollupOptions().enabled)
         self.assertEqual(FreeShippingRollupOptions().markup_percent, 30.0)
+
+    def test_trial_batch_starts_with_selected_row_and_keeps_row_order(self):
+        frame = pd.DataFrame(
+            [{"Title": f"Book {position}"} for position in range(7)],
+            index=[10, 20, 30, 40, 50, 60, 70],
+        )
+
+        self.assertEqual(select_trial_batch_indices(frame, 30), [30, 40, 50, 60, 70])
+        self.assertEqual(select_trial_batch_indices(frame, 60), [60, 70])
+        self.assertEqual(select_trial_batch_indices(frame, 999), [10, 20, 30, 40, 50])
 
     def test_detect_book_count_sums_multiple_complete_ranges(self):
         count, evidence = detect_book_count("浦安鉄筋家族1〜31全巻 元祖！浦安鉄筋家族1〜28全巻")

@@ -81,6 +81,7 @@ FREE_SHIPPING_PROFILE_OPTIONS = [
     "Free Shipping Policy",
 ]
 DEFAULT_FREE_SHIPPING_MARKUP_PERCENT = 30.0
+TRIAL_PROCESSING_BATCH_SIZE = 5
 EBAY_ITEM_SPECIFIC_VALUE_MAX_CHARS = 65
 REVIEW_TABLE_HEIGHT_PX = 780
 REVIEW_TABLE_ROW_HEIGHT_PX = 176
@@ -8419,6 +8420,23 @@ def remove_manual_title_override_from_frame(
     return result.fillna("")
 
 
+def select_trial_batch_indices(
+    frame: pd.DataFrame,
+    selected_index: object,
+    *,
+    batch_size: int = TRIAL_PROCESSING_BATCH_SIZE,
+) -> list[object]:
+    """選択商品を先頭に、試行処理する連続行を最大件数まで返す。"""
+    indices = list(frame.index)
+    if not indices:
+        return []
+    try:
+        start = indices.index(selected_index)
+    except ValueError:
+        start = 0
+    return indices[start : start + max(int(batch_size), 1)]
+
+
 def process_dataframe(
     frame: pd.DataFrame,
     config: ProcessingConfig,
@@ -9988,7 +10006,12 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             title_overrides=title_overrides,
         )
 
-        render_section_heading(st, "STEP 3", "自動処理", "まず1件だけ試すことも、CSV全体をまとめて処理することもできます。")
+        render_section_heading(
+            st,
+            "STEP 3",
+            "自動処理",
+            f"選択商品から最大{TRIAL_PROCESSING_BATCH_SIZE}件だけ試すことも、CSV全体をまとめて処理することもできます。",
+        )
         with st.container(border=True):
             rollup_enabled = st.checkbox("送料を価格に転嫁して送料無料にする", value=True)
             free_shipping_profile_name = st.selectbox(
@@ -10022,7 +10045,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                 use_container_width=True,
             )
             process_selected = run_one_col.button(
-                "1件だけ試す",
+                f"{TRIAL_PROCESSING_BATCH_SIZE}件だけ試す",
                 type="secondary",
                 icon=":material/science:",
                 use_container_width=True,
@@ -10050,7 +10073,11 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             st.info("処理結果を消去し、元CSVの状態へ戻しました。")
 
     if process_selected or process_all:
-        indices = [selected_index] if process_selected else list(active_frame.index)
+        indices = (
+            select_trial_batch_indices(active_frame, selected_index)
+            if process_selected
+            else list(active_frame.index)
+        )
         total_hint = len(indices)
         started_at = time.monotonic()
         workflow_slot.markdown(build_workflow_steps_html(3), unsafe_allow_html=True)
