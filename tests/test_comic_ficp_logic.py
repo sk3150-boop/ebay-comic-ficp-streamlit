@@ -449,10 +449,10 @@ with download_slot.container():
 
     def test_default_export_safety_limits(self):
         self.assertEqual(DEFAULT_MAX_BOOK_COUNT_FOR_EXPORT, 40)
-        self.assertEqual(DEFAULT_FREE_SHIPPING_MARKUP_PERCENT, 10.0)
+        self.assertEqual(DEFAULT_FREE_SHIPPING_MARKUP_PERCENT, 30.0)
         self.assertEqual(ProcessingConfig().max_book_count_for_export, 40)
         self.assertTrue(FreeShippingRollupOptions().enabled)
-        self.assertEqual(FreeShippingRollupOptions().markup_percent, 10.0)
+        self.assertEqual(FreeShippingRollupOptions().markup_percent, 30.0)
 
     def test_detect_book_count_sums_multiple_complete_ranges(self):
         count, evidence = detect_book_count("浦安鉄筋家族1〜31全巻 元祖！浦安鉄筋家族1〜28全巻")
