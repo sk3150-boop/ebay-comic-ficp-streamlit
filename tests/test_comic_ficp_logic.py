@@ -452,11 +452,11 @@ with download_slot.container():
 
     def test_default_export_safety_limits(self):
         self.assertEqual(DEFAULT_MAX_BOOK_COUNT_FOR_EXPORT, 40)
-        self.assertEqual(DEFAULT_FREE_SHIPPING_MARKUP_PERCENT, 30.0)
+        self.assertEqual(DEFAULT_FREE_SHIPPING_MARKUP_PERCENT, 45.0)
         self.assertEqual(TRIAL_PROCESSING_BATCH_SIZE, 5)
         self.assertEqual(ProcessingConfig().max_book_count_for_export, 40)
         self.assertTrue(FreeShippingRollupOptions().enabled)
-        self.assertEqual(FreeShippingRollupOptions().markup_percent, 30.0)
+        self.assertEqual(FreeShippingRollupOptions().markup_percent, 45.0)
 
     def test_trial_batch_starts_with_selected_row_and_keeps_row_order(self):
         frame = pd.DataFrame(
