@@ -4421,6 +4421,24 @@ def fetch_usd_jpy_exchange_rate() -> ExchangeRateEstimate:
     )
 
 
+def apply_usd_jpy_exchange_rate_to_session_state(
+    session_state,
+    exchange_rate: ExchangeRateEstimate,
+) -> None:
+    """取得したUSD/JPYレートと監査情報を同じセッションへ反映する。"""
+    session_state["usd_jpy_exchange_rate"] = exchange_rate.rate
+    session_state["usd_jpy_exchange_rate_source"] = exchange_rate.source
+    session_state["usd_jpy_exchange_rate_date"] = exchange_rate.date
+    session_state["usd_jpy_exchange_rate_status"] = exchange_rate.status
+
+
+def refresh_usd_jpy_exchange_rate_session_state(session_state) -> ExchangeRateEstimate:
+    """ウィジェット描画前のコールバックで最新レートを安全に反映する。"""
+    latest_rate = fetch_usd_jpy_exchange_rate()
+    apply_usd_jpy_exchange_rate_to_session_state(session_state, latest_rate)
+    return latest_rate
+
+
 def ficp_us_zone_label(zone: str) -> str:
     zone = str(zone or "").upper().strip()
     if zone == "F":
@@ -9745,27 +9763,22 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                 )
             if "usd_jpy_exchange_rate" not in st.session_state:
                 latest_rate = fetch_usd_jpy_exchange_rate()
-                st.session_state["usd_jpy_exchange_rate"] = latest_rate.rate
-                st.session_state["usd_jpy_exchange_rate_source"] = latest_rate.source
-                st.session_state["usd_jpy_exchange_rate_date"] = latest_rate.date
-                st.session_state["usd_jpy_exchange_rate_status"] = latest_rate.status
+                apply_usd_jpy_exchange_rate_to_session_state(st.session_state, latest_rate)
 
             rate_col1, rate_col2 = st.columns([0.68, 0.32])
             exchange_rate = rate_col1.number_input(
                 "USD換算レート(JPY/USD)",
                 min_value=1.0,
                 max_value=500.0,
-                value=float(st.session_state.get("usd_jpy_exchange_rate", DEFAULT_EXCHANGE_RATE_JPY_PER_USD)),
                 step=0.1,
                 key="usd_jpy_exchange_rate",
             )
-            if rate_col2.button("最新レート取得", use_container_width=True):
-                latest_rate = fetch_usd_jpy_exchange_rate()
-                st.session_state["usd_jpy_exchange_rate"] = latest_rate.rate
-                st.session_state["usd_jpy_exchange_rate_source"] = latest_rate.source
-                st.session_state["usd_jpy_exchange_rate_date"] = latest_rate.date
-                st.session_state["usd_jpy_exchange_rate_status"] = latest_rate.status
-                st.rerun()
+            rate_col2.button(
+                "最新レート取得",
+                use_container_width=True,
+                on_click=refresh_usd_jpy_exchange_rate_session_state,
+                args=(st.session_state,),
+            )
             exchange_rate_source = str(st.session_state.get("usd_jpy_exchange_rate_source", "manual/default"))
             exchange_rate_date = str(st.session_state.get("usd_jpy_exchange_rate_date", ""))
             exchange_rate_status = str(st.session_state.get("usd_jpy_exchange_rate_status", "manual/default"))

@@ -16,6 +16,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     AIEnrichment,
     APIUsage,
     AUTOFILL_MARKER_START,
+    ExchangeRateEstimate,
     DEFAULT_BOOK_WEIGHT_G,
     DEFAULT_FICP_ZONE,
     DEFAULT_FREE_SHIPPING_PROFILE_NAME,
@@ -38,6 +39,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     ReferenceBookCountResult,
     append_description,
     append_unique_buyer_notes,
+    apply_usd_jpy_exchange_rate_to_session_state,
     apply_query_selected_row,
     apply_item_specifics,
     build_description_append,
@@ -106,6 +108,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     parse_ai_enrichment_payload,
     process_dataframe,
     redact_sensitive_text,
+    refresh_usd_jpy_exchange_rate_session_state,
     resolve_preflight_selected_position,
     render_product_selection_dataframe,
     render_public_remember_cookie_script,
@@ -1483,6 +1486,78 @@ with download_slot.container():
         self.assertEqual(result.date, "2026-06-26")
         self.assertEqual(result.status, "ok")
         mocked_get.assert_called_once()
+
+    def test_refresh_usd_jpy_exchange_rate_updates_rate_and_audit_fields(self):
+        session_state = {
+            "usd_jpy_exchange_rate": 155.0,
+            "usd_jpy_exchange_rate_source": "manual/default",
+            "usd_jpy_exchange_rate_date": "",
+            "usd_jpy_exchange_rate_status": "manual/default",
+        }
+        latest_rate = ExchangeRateEstimate(
+            rate=162.84,
+            source="Frankfurter",
+            date="2026-07-31",
+            status="ok",
+        )
+
+        with patch(
+            "comic_ficp_streamlit_app.fetch_usd_jpy_exchange_rate",
+            return_value=latest_rate,
+        ):
+            result = refresh_usd_jpy_exchange_rate_session_state(session_state)
+
+        self.assertEqual(result, latest_rate)
+        self.assertEqual(session_state["usd_jpy_exchange_rate"], 162.84)
+        self.assertEqual(session_state["usd_jpy_exchange_rate_source"], "Frankfurter")
+        self.assertEqual(session_state["usd_jpy_exchange_rate_date"], "2026-07-31")
+        self.assertEqual(session_state["usd_jpy_exchange_rate_status"], "ok")
+
+    def test_exchange_rate_refresh_callback_updates_widget_without_streamlit_exception(self):
+        from streamlit.testing.v1 import AppTest
+
+        script = '''
+import streamlit as st
+from comic_ficp_streamlit_app import ExchangeRateEstimate, apply_usd_jpy_exchange_rate_to_session_state
+
+def refresh_rate():
+    apply_usd_jpy_exchange_rate_to_session_state(
+        st.session_state,
+        ExchangeRateEstimate(162.84, "Frankfurter", "2026-07-31", "ok"),
+    )
+
+if "usd_jpy_exchange_rate" not in st.session_state:
+    apply_usd_jpy_exchange_rate_to_session_state(
+        st.session_state,
+        ExchangeRateEstimate(155.0, "manual/default", "", "manual/default"),
+    )
+
+rate_col1, rate_col2 = st.columns([0.68, 0.32])
+exchange_rate = rate_col1.number_input(
+    "USD換算レート(JPY/USD)",
+    min_value=1.0,
+    max_value=500.0,
+    step=0.1,
+    key="usd_jpy_exchange_rate",
+)
+rate_col2.button("最新レート取得", on_click=refresh_rate)
+st.caption(
+    f"USD/JPY: {float(exchange_rate):.4f} / 取得元: "
+    f"{st.session_state['usd_jpy_exchange_rate_source']} / "
+    f"日付: {st.session_state['usd_jpy_exchange_rate_date']}"
+)
+'''
+        app = AppTest.from_string(script, default_timeout=30).run()
+
+        self.assertEqual(0, len(app.exception))
+        self.assertEqual(155.0, app.number_input[0].value)
+
+        app.button[0].click().run()
+
+        self.assertEqual(0, len(app.exception))
+        self.assertEqual(162.84, app.number_input[0].value)
+        self.assertIn("取得元: Frankfurter", app.caption[0].value)
+        self.assertIn("日付: 2026-07-31", app.caption[0].value)
 
     def test_mercari_image_url_inference(self):
         inferred = infer_mercari_url_from_image_url(
