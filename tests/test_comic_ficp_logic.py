@@ -50,6 +50,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     build_api_usage,
     build_ebay_preflight_table,
     build_exclusion_table,
+    build_trial_export_dataframe,
     build_export_dataframe,
     build_processing_diagnostic_table,
     build_preview_image_urls,
@@ -1140,6 +1141,49 @@ with download_slot.container():
         self.assertEqual(export.loc[1, "StartPrice"], "50.00")
         self.assertEqual(export.loc[1, "ShippingProfileName"], "Old")
         self.assertEqual(export.loc[1, "Free Shipping Rollup Status"], "skipped: FICP Shipping USD is missing")
+
+    def test_trial_export_contains_only_the_processed_batch_and_keeps_safety_exclusions(self):
+        frame = pd.DataFrame(
+            [
+                {"Title": "Trial ready", "Listing Eligibility": "OK", "Needs Review": "No"},
+                {"Title": "Trial review", "Listing Eligibility": "OK", "Needs Review": "Yes"},
+                {"Title": "Trial excluded", "Listing Eligibility": "Excluded", "Needs Review": "No"},
+                {"Title": "Trial ready second", "Listing Eligibility": "OK", "Needs Review": "No"},
+                {"Title": "Outside the trial", "Listing Eligibility": "OK", "Needs Review": "No"},
+            ],
+            index=[10, 20, 30, 40, 50],
+        )
+
+        export = build_trial_export_dataframe(
+            frame,
+            [10, 20, 30, 40],
+            FreeShippingRollupOptions(enabled=False),
+        )
+
+        self.assertEqual(export["Title"].tolist(), ["Trial ready", "Trial ready second"])
+        self.assertNotIn("Outside the trial", export["Title"].tolist())
+
+    def test_trial_download_panel_exposes_a_csv_download_for_the_processed_batch(self):
+        from streamlit.testing.v1 import AppTest
+
+        script = '''
+import pandas as pd
+import streamlit as st
+from comic_ficp_streamlit_app import render_trial_download_panel
+
+render_trial_download_panel(
+    st,
+    pd.DataFrame([{"Title": "Trial ready"}]),
+    b"Title\\nTrial ready\\n",
+    "ebay-comic-ficp-trial-5items.csv",
+    5,
+)
+'''
+        app = AppTest.from_string(script, default_timeout=30).run()
+
+        self.assertEqual(0, len(app.exception))
+        self.assertEqual(1, len(app.get("download_button")))
+        self.assertEqual(app.get("download_button")[0].label, "試した5件のeBay用CSVを保存する")
 
     @unittest.skipIf(os.name != "nt", "Windows DPAPI storage is only available on Windows")
     def test_saved_api_key_round_trip_uses_encrypted_local_store(self):

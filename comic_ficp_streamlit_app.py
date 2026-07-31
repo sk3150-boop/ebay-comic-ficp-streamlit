@@ -69,6 +69,8 @@ UPLOAD_CACHE_RAW_PATH = API_KEY_STORE_PATH.with_name("last_uploaded_csv.bin")
 UPLOAD_CACHE_META_PATH = API_KEY_STORE_PATH.with_name("last_uploaded_csv.json")
 PROCESSED_CACHE_DF_PATH = API_KEY_STORE_PATH.with_name("last_processed_dataframe.pkl")
 PROCESSED_CACHE_META_PATH = API_KEY_STORE_PATH.with_name("last_processed_dataframe.json")
+LAST_TRIAL_ROW_INDICES_KEY = "comic_ficp_last_trial_row_indices"
+LAST_TRIAL_FILE_KEY = "comic_ficp_last_trial_file_key"
 DEFAULT_EXCHANGE_RATE_JPY_PER_USD = 155.0
 DEFAULT_FUEL_SURCHARGE_PERCENT = 35.0
 DEFAULT_FICP_ZONE = "E"
@@ -2597,6 +2599,20 @@ def build_export_dataframe(
     if free_shipping_rollup and free_shipping_rollup.enabled:
         export_frame = apply_free_shipping_rollup(export_frame, free_shipping_rollup)
     return export_frame
+
+
+def build_trial_export_dataframe(
+    frame: pd.DataFrame,
+    row_indices: Iterable[object],
+    free_shipping_rollup: Optional[FreeShippingRollupOptions] = None,
+) -> pd.DataFrame:
+    """試行した行だけを、通常のeBay出力と同じ安全基準でCSV化する。"""
+    selected_indices: list[object] = []
+    for index in row_indices:
+        if index in frame.index and index not in selected_indices:
+            selected_indices.append(index)
+    trial_frame = frame.loc[selected_indices].copy() if selected_indices else frame.iloc[0:0].copy()
+    return build_export_dataframe(trial_frame, free_shipping_rollup)
 
 
 def summarize_free_shipping_rollup(frame: pd.DataFrame) -> dict[str, str]:
@@ -9507,6 +9523,45 @@ def render_priority_download_panel(
         )
 
 
+def render_trial_download_panel(
+    st,
+    export_frame: pd.DataFrame,
+    export_csv_bytes: bytes,
+    output_name: str,
+    processed_count: int,
+) -> None:
+    with st.container(border=True):
+        st.markdown(
+            f"""
+            <div class="priority-download-card">
+              <div class="priority-download-icon" aria-hidden="true">5</div>
+              <div>
+                <span>試行処理が完了しました</span>
+                <h2>試した{processed_count:,}件だけを保存できます</h2>
+                <p>出力可能 {len(export_frame):,}件。全件CSVとは別ファイルとして保存されます。</p>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        withheld_count = processed_count - len(export_frame)
+        if withheld_count:
+            st.warning(f"要確認・出力除外の {withheld_count:,}件は、この試行CSVから自動で外れます。")
+        if export_frame.empty:
+            st.warning("この試行分には保存できる商品がありません。要確認・出力除外の理由を確認してください。")
+            return
+        st.download_button(
+            f"試した{processed_count:,}件のeBay用CSVを保存する",
+            data=export_csv_bytes,
+            file_name=output_name,
+            mime="text/csv",
+            type="primary",
+            icon=":material/download:",
+            key="comic_ficp_download_trial",
+            use_container_width=True,
+        )
+
+
 def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     st = load_streamlit()
     st.set_page_config(
@@ -10066,6 +10121,8 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         st.session_state["comic_ficp_processed_df"] = frame
         st.session_state.pop("comic_ficp_last_api_cost_summary", None)
         st.session_state.pop("comic_ficp_last_api_cost_file_key", None)
+        st.session_state.pop(LAST_TRIAL_ROW_INDICES_KEY, None)
+        st.session_state.pop(LAST_TRIAL_FILE_KEY, None)
         active_frame = frame
         save_processed_dataframe_cache(active_frame, file_key)
         workflow_slot.markdown(build_workflow_steps_html(2), unsafe_allow_html=True)
@@ -10111,6 +10168,12 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             st.session_state["comic_ficp_last_api_cost_summary"] = run_cost_summary
             st.session_state["comic_ficp_last_api_cost_file_key"] = file_key
             st.session_state["comic_ficp_processed_df"] = active_frame
+            if process_selected:
+                st.session_state[LAST_TRIAL_ROW_INDICES_KEY] = list(indices)
+                st.session_state[LAST_TRIAL_FILE_KEY] = file_key
+            else:
+                st.session_state.pop(LAST_TRIAL_ROW_INDICES_KEY, None)
+                st.session_state.pop(LAST_TRIAL_FILE_KEY, None)
             save_processed_dataframe_cache(active_frame, file_key)
             elapsed_total = time.monotonic() - started_at
             progress_bar.progress(1.0, text=f"{total_hint}/{total_hint}件（100.0%）")
@@ -10138,7 +10201,29 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     all_rows_processed = bool(ui_summary["total"]) and ui_summary["remaining"] == 0
     output_name = f"ebay-comic-ficp-{time.strftime('%Y%m%d-%H%M%S')}.csv"
     export_csv_bytes = dataframe_to_csv_bytes(export_frame)
-    if all_rows_processed and not export_frame.empty:
+    trial_row_indices = st.session_state.get(LAST_TRIAL_ROW_INDICES_KEY, [])
+    trial_is_current = (
+        st.session_state.get(LAST_TRIAL_FILE_KEY) == file_key
+        and isinstance(trial_row_indices, list)
+        and bool(trial_row_indices)
+    )
+    trial_export_frame = (
+        build_trial_export_dataframe(active_frame, trial_row_indices, rollup_options)
+        if trial_is_current
+        else active_frame.iloc[0:0].copy()
+    )
+    trial_output_name = f"ebay-comic-ficp-trial-{len(trial_row_indices)}items-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    trial_export_csv_bytes = dataframe_to_csv_bytes(trial_export_frame)
+    if trial_is_current and not all_rows_processed:
+        with priority_download_slot.container():
+            render_trial_download_panel(
+                st,
+                trial_export_frame,
+                trial_export_csv_bytes,
+                trial_output_name,
+                len(trial_row_indices),
+            )
+    elif all_rows_processed and not export_frame.empty:
         with priority_download_slot.container():
             render_priority_download_panel(
                 st,
