@@ -55,6 +55,8 @@ TITLE_OVERRIDE_STORE_PATH = API_KEY_STORE_PATH.with_name("title_overrides.json")
 PUBLIC_MODE_ENV = "COMIC_FICP_PUBLIC_MODE"
 PUBLIC_DATABASE_URL_ENV = "COMIC_FICP_DATABASE_URL"
 PUBLIC_KEY_SECRET_ENV = "COMIC_FICP_KEY_ENCRYPTION_SECRET"
+PUBLIC_AUTH_REQUIRED_ENV = "COMIC_FICP_PUBLIC_AUTH_REQUIRED"
+PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV = "COMIC_FICP_PUBLIC_WORKSPACE_USERNAME"
 PUBLIC_SESSION_USER_KEY = "comic_ficp_public_user"
 PUBLIC_REMEMBER_COOKIE_NAME = "comic_ficp_remember"
 PUBLIC_REMEMBER_DAYS = 30
@@ -64,6 +66,7 @@ PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY = "comic_public_active_remember_token_hash
 PUBLIC_CLEAR_REMEMBER_COOKIE_KEY = "comic_public_clear_remember_cookie"
 PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY = "comic_public_remember_restore_blocked"
 PUBLIC_LOGIN_NOTICE_KEY = "comic_public_login_notice"
+PUBLIC_SINGLE_WORKSPACE_COOKIE_CLEARED_KEY = "comic_public_single_workspace_cookie_cleared"
 PUBLIC_AUTH_DB_FALLBACK_PATH = API_KEY_STORE_PATH.with_name("public_auth.sqlite3")
 UPLOAD_CACHE_RAW_PATH = API_KEY_STORE_PATH.with_name("last_uploaded_csv.bin")
 UPLOAD_CACHE_META_PATH = API_KEY_STORE_PATH.with_name("last_uploaded_csv.json")
@@ -711,6 +714,25 @@ def is_public_mode() -> bool:
     return env_flag_enabled(PUBLIC_MODE_ENV)
 
 
+def public_auth_required() -> bool:
+    """Return whether the public app should show its account login screen.
+
+    Public authentication remains enabled unless a deployment explicitly opts
+    into the single, passwordless workspace mode. This preserves the existing
+    multi-account behavior everywhere else.
+    """
+    if not is_public_mode():
+        return False
+    configured = os.getenv(PUBLIC_AUTH_REQUIRED_ENV)
+    if configured is None or not str(configured).strip():
+        return True
+    return str(configured).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def public_single_workspace_username() -> str:
+    return normalize_public_username(os.getenv(PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV, ""))
+
+
 def public_database_url() -> str:
     return str(os.getenv(PUBLIC_DATABASE_URL_ENV, "") or "").strip()
 
@@ -891,6 +913,60 @@ def create_public_user(username: str, password: str, database_url: Optional[str]
             if "unique" in str(error).lower() or "duplicate" in str(error).lower():
                 return False, "このユーザー名はすでに使われています。"
             return False, f"アカウント作成に失敗しました: {redact_sensitive_text(error)}"
+
+
+def ensure_public_single_workspace_user(
+    database_url: Optional[str] = None,
+) -> tuple[bool, dict[str, str], str]:
+    """Return the configured passwordless workspace, creating it once if needed.
+
+    The generated password is never displayed or stored outside its salted
+    database hash. It preserves the existing per-user API-key and title
+    override schema without asking the user to log in.
+    """
+    username = public_single_workspace_username()
+    if len(username) < 3:
+        return (
+            False,
+            {},
+            f"{PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV} に3文字以上の作業スペース名を設定してください。",
+        )
+    init_public_auth_storage(database_url)
+    with public_db_connection(database_url) as (conn, backend):
+        cursor = conn.cursor()
+        param = public_db_param(backend)
+        cursor.execute(
+            f"SELECT id, username FROM comic_ficp_users WHERE username = {param}",
+            (username,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            generated_password_hash = hash_public_password(secrets.token_urlsafe(32))
+            if backend == "postgres":
+                cursor.execute(
+                    f"""
+                    INSERT INTO comic_ficp_users (username, password_hash, created_at)
+                    VALUES ({param}, {param}, {param})
+                    ON CONFLICT (username) DO NOTHING
+                    """,
+                    (username, generated_password_hash, time.time()),
+                )
+            else:
+                cursor.execute(
+                    f"""
+                    INSERT OR IGNORE INTO comic_ficp_users (username, password_hash, created_at)
+                    VALUES ({param}, {param}, {param})
+                    """,
+                    (username, generated_password_hash, time.time()),
+                )
+            cursor.execute(
+                f"SELECT id, username FROM comic_ficp_users WHERE username = {param}",
+                (username,),
+            )
+            row = cursor.fetchone()
+    if not row:
+        return False, {}, "単一作業スペースを準備できませんでした。"
+    return True, {"id": str(row[0]), "username": str(row[1])}, "作業スペースを準備しました。"
 
 
 def authenticate_public_user(username: str, password: str, database_url: Optional[str] = None) -> tuple[bool, dict[str, str], str]:
@@ -1202,7 +1278,7 @@ def save_public_title_override(
                 """,
                 (int(user_id), native_key, native_title, resolved_series_title, now, now),
             )
-    return True, "このアカウント専用の作品名補正を保存しました。"
+    return True, "この作業スペース専用の作品名補正を保存しました。"
 
 
 def delete_public_title_override(
@@ -1346,6 +1422,20 @@ def render_public_login_gate(st) -> bool:
         st.error(message)
         st.stop()
         return False
+    if not public_auth_required():
+        workspace_ready, workspace_user, workspace_message = ensure_public_single_workspace_user(public_database_url())
+        if not workspace_ready:
+            st.error(workspace_message)
+            st.stop()
+            return False
+        existing_user = current_public_user(st)
+        if existing_user and existing_user.get("id") != workspace_user["id"]:
+            clear_public_session_work_data(st)
+        st.session_state[PUBLIC_SESSION_USER_KEY] = workspace_user
+        if not st.session_state.get(PUBLIC_SINGLE_WORKSPACE_COOKIE_CLEARED_KEY):
+            render_public_remember_cookie_script(clear_cookie=True)
+            st.session_state[PUBLIC_SINGLE_WORKSPACE_COOKIE_CLEARED_KEY] = True
+        return True
     if st.session_state.pop(PUBLIC_CLEAR_REMEMBER_COOKIE_KEY, False):
         render_public_remember_cookie_script(clear_cookie=True)
         st.session_state[PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY] = True
@@ -9931,7 +10021,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                         )
                         if use_saved_key and public_user:
                             ai_api_key = load_public_saved_api_key(public_user["id"], ai_provider, public_database_url())
-                    st.caption("公開版では、APIキーはユーザー別にサーバーDBへ暗号化保存されます。CSVや処理ログには出力しません。")
+                    st.caption("この作業スペースのAPIキーはサーバーDBへ暗号化保存されます。CSVや処理ログには出力しません。")
                     new_api_key = st.text_input(
                         "新しいAPIキーを保存する",
                         value="",
@@ -10018,7 +10108,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             else:
                 st.caption("メルカリの説明欄・商品状態はChrome取得とルール処理で補完します。AI/API補完はOFFです。")
                 if enable_title_resolution and title_overrides:
-                    st.caption(f"保存済みのアカウント専用タイトル補正 {len(title_overrides):,}件は引き続き適用します。")
+                    st.caption(f"保存済みの作業スペース専用タイトル補正 {len(title_overrides):,}件は引き続き適用します。")
             with st.expander("取得が不安定なときの調整", expanded=False):
                 request_delay = st.slider(
                     "連続処理の待ち時間(秒)",
@@ -12412,7 +12502,7 @@ def render_title_resolution_panel(
 
         input_key_hash = hashlib.sha256(normalize_native_title_key(native_title).encode("utf-8")).hexdigest()[:12]
         manual_title = st.text_input(
-            "このアカウント専用の英語作品名",
+            "この作業スペース専用の英語作品名",
             value="" if resolved_title == "-" else resolved_title,
             key=f"comic_ficp_manual_title_{selected_index}_{input_key_hash}",
             help="巻数・Set・Complete・Japaneseは入力せず、英語作品名だけを入力してください。",

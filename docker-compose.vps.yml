@@ -23,6 +23,8 @@ services:
     environment:
       PORT: 8501
       COMIC_FICP_PUBLIC_MODE: "1"
+      COMIC_FICP_PUBLIC_AUTH_REQUIRED: "0"
+      COMIC_FICP_PUBLIC_WORKSPACE_USERNAME: "workspace"
       COMIC_FICP_DATABASE_URL: postgresql://comic_ficp:${POSTGRES_PASSWORD}@db:5432/comic_ficp
       COMIC_FICP_KEY_ENCRYPTION_SECRET: ${COMIC_FICP_KEY_ENCRYPTION_SECRET:?COMIC_FICP_KEY_ENCRYPTION_SECRET is required}
     ports:
@@ -30,4 +32,3 @@ services:
 
 volumes:
   comic_ficp_db:
-

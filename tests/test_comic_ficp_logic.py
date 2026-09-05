@@ -32,9 +32,11 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     OPENAI_MODEL_OPTIONS,
     PREFLIGHT_PENDING_SELECTION_KEY,
     PUBLIC_ACTIVE_REMEMBER_TOKEN_HASH_KEY,
+    PUBLIC_AUTH_REQUIRED_ENV,
     PUBLIC_REMEMBER_COOKIE_NAME,
     PUBLIC_REMEMBER_RESTORE_BLOCKED_KEY,
     PUBLIC_SESSION_USER_KEY,
+    PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV,
     ProcessingConfig,
     ReferenceBookCountResult,
     TRIAL_PROCESSING_BATCH_SIZE,
@@ -88,6 +90,7 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     estimate_api_cost_usd,
     estimate_packaging_weight_kg,
     estimate_ui_remaining_seconds,
+    ensure_public_single_workspace_user,
     extract_json_object,
     extract_listing_payload,
     extract_buyer_relevant_listing_details,
@@ -113,11 +116,14 @@ from comic_ficp_streamlit_app import (  # noqa: E402
     refresh_usd_jpy_exchange_rate_session_state,
     resolve_preflight_selected_position,
     render_product_selection_dataframe,
+    render_public_login_gate,
     render_public_remember_cookie_script,
     restore_public_user_from_remember_cookie,
     authenticate_public_remember_token,
     authenticate_public_user,
     public_saved_api_key_exists,
+    public_auth_required,
+    public_single_workspace_username,
     save_api_key,
     save_public_api_key,
     load_processed_dataframe_cache,
@@ -1228,6 +1234,74 @@ render_trial_download_panel(
             deleted, delete_message = delete_public_saved_api_key(user_a["id"], "gemini", db_url)
             self.assertTrue(deleted, delete_message)
             self.assertFalse(public_saved_api_key_exists(user_a["id"], "gemini", db_url))
+
+    def test_public_single_workspace_mode_creates_and_reuses_passwordless_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "COMIC_FICP_PUBLIC_MODE": "1",
+                PUBLIC_AUTH_REQUIRED_ENV: "0",
+                PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV: "manga_workspace",
+            },
+            clear=False,
+        ):
+            db_url = f"sqlite:///{Path(temp_dir) / 'public.sqlite3'}"
+            self.assertFalse(public_auth_required())
+            self.assertEqual(public_single_workspace_username(), "manga_workspace")
+
+            created, first_user, first_message = ensure_public_single_workspace_user(db_url)
+            reused, second_user, second_message = ensure_public_single_workspace_user(db_url)
+
+            self.assertTrue(created, first_message)
+            self.assertTrue(reused, second_message)
+            self.assertEqual(first_user, second_user)
+            self.assertEqual(first_user["username"], "manga_workspace")
+            self.assertFalse(authenticate_public_user("manga_workspace", "not-the-generated-password", db_url)[0])
+
+    def test_public_single_workspace_requires_explicit_workspace_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "COMIC_FICP_PUBLIC_MODE": "1",
+                PUBLIC_AUTH_REQUIRED_ENV: "0",
+                PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV: "",
+            },
+            clear=False,
+        ):
+            ready, user, message = ensure_public_single_workspace_user(
+                f"sqlite:///{Path(temp_dir) / 'public.sqlite3'}"
+            )
+            self.assertFalse(ready)
+            self.assertEqual(user, {})
+            self.assertIn(PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV, message)
+
+    def test_public_auth_remains_required_without_passwordless_opt_in(self):
+        with patch.dict(
+            os.environ,
+            {"COMIC_FICP_PUBLIC_MODE": "1", PUBLIC_AUTH_REQUIRED_ENV: "1"},
+            clear=False,
+        ):
+            self.assertTrue(public_auth_required())
+
+    def test_public_single_workspace_skips_login_gate_and_sets_workspace_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_url = f"sqlite:///{Path(temp_dir) / 'public.sqlite3'}"
+            fake_st = FakeStreamlit()
+            with patch.dict(
+                os.environ,
+                {
+                    "COMIC_FICP_PUBLIC_MODE": "1",
+                    PUBLIC_AUTH_REQUIRED_ENV: "0",
+                    PUBLIC_SINGLE_WORKSPACE_USERNAME_ENV: "manga_workspace",
+                    "COMIC_FICP_DATABASE_URL": db_url,
+                    "COMIC_FICP_KEY_ENCRYPTION_SECRET": "unit-test-encryption-secret",
+                },
+                clear=False,
+            ), patch("comic_ficp_streamlit_app.render_public_remember_cookie_script") as clear_cookie:
+                self.assertTrue(render_public_login_gate(fake_st))
+
+            self.assertEqual(fake_st.session_state[PUBLIC_SESSION_USER_KEY]["username"], "manga_workspace")
+            clear_cookie.assert_called_once_with(clear_cookie=True)
 
     def test_public_remember_token_restores_user_without_storing_raw_token(self):
         with tempfile.TemporaryDirectory() as temp_dir:
