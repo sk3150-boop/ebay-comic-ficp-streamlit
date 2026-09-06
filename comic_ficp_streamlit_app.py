@@ -9367,11 +9367,10 @@ def summarize_ui_rows(frame: pd.DataFrame) -> dict[str, int]:
         if not row_is_processed(row):
             continue
         processed += 1
-        eligibility = get_row_value(row, "Listing Eligibility").lower()
-        needs_review = get_row_value(row, "Needs Review").lower() == "yes"
-        if eligibility == "excluded":
+        status = review_workflow.review_status(row, sys.modules[__name__], processed=True)
+        if status == "除外":
             excluded += 1
-        elif needs_review:
+        elif status == "要確認":
             review += 1
         else:
             ready += 1
@@ -9686,14 +9685,17 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     )
     render_global_styles(st)
     render_app_header(st)
-    render_public_login_gate(st)
     history_store = None
     workspace_id = "local"
-    try:
-        history_store, workspace_id = review_workflow.open_history(st, sys.modules[__name__])
-    except Exception:
-        st.warning("履歴データベースに接続できません。CSVの作業は続けられますが、履歴保存には接続の復旧が必要です。")
-    review_workflow.render_save_health(st, history_store)
+    # Optional cookie and save-status elements must not move the tabs' delta path.
+    # A changed path remounts unkeyed tabs and resets the selected page in browsers.
+    with st.container(key="comic_review_session_status"):
+        render_public_login_gate(st)
+        try:
+            history_store, workspace_id = review_workflow.open_history(st, sys.modules[__name__])
+        except Exception:
+            st.warning("履歴データベースに接続できません。CSVの作業は続けられますが、履歴保存には接続の復旧が必要です。")
+        review_workflow.render_save_health(st, history_store)
     work_page, history_page = st.tabs(["CSVを精査", "精査履歴"])
     with history_page:
         if history_store is not None:
@@ -12487,8 +12489,7 @@ def render_additional_image_gallery(st, image_urls: list[str]) -> None:
 
 
 def build_selected_decision_html(row: pd.Series, processed: bool, *, readonly: bool = False) -> str:
-    eligibility = get_row_value(row, "Listing Eligibility").lower()
-    needs_review = get_row_value(row, "Needs Review").lower() == "yes"
+    status = review_workflow.review_status(row, sys.modules[__name__], processed=processed)
     review_reason = get_row_value(row, "Needs Review Reason")
     image_status = get_row_value(row, "Image URL Validation Status")
     rejected_images = get_row_value(row, "Rejected Source Image URL Count") or "0"
@@ -12498,16 +12499,21 @@ def build_selected_decision_html(row: pd.Series, processed: bool, *, readonly: b
         decision_label = "未処理"
         decision_detail = "自動処理を実行してください"
         next_action = "まず5件試すか、全件をまとめて処理"
-    elif needs_review:
+    elif status == "要確認":
         decision_tone = "warning"
         decision_label = "要確認"
         decision_detail = review_reason or "判断根拠を確認してください"
         next_action = "要確認の理由を確認"
-    elif eligibility == "excluded":
+    elif status == "除外":
         decision_tone = "danger"
         decision_label = "出力除外"
         decision_detail = get_row_value(row, "Exclusion Reason") or "出力対象外です"
         next_action = "除外理由を確認"
+    elif status == "注意あり":
+        decision_tone = "warning"
+        decision_label = "出力可能・注意あり"
+        decision_detail = review_reason or "参照根拠を確認してください"
+        next_action = "注意の理由を確認"
     else:
         decision_tone = "success"
         decision_label = "出力可能"
@@ -12584,7 +12590,10 @@ def render_title_resolution_panel(
         if status.lower() == "ai-auto" and confidence.lower() == "low":
             st.warning(f"低信頼のAI候補です（{status_text}）。CSV出力はできますが、参照根拠を確認してください。")
         elif status.lower() == "failed":
-            st.error("海外タイトルを確認できなかったため、この行はCSV出力保留です。手動補正を保存すると解除できます。")
+            if readonly:
+                st.error("処理当時は海外タイトルを確認できず、CSV出力保留でした。この履歴は閲覧専用です。")
+            else:
+                st.error("海外タイトルを確認できなかったため、この行はCSV出力保留です。手動補正を保存すると解除できます。")
         elif status:
             st.success(f"判定: {status_text}")
         st.caption(f"方式: {method}")
@@ -12728,9 +12737,9 @@ def render_selected_preview(
                 for image_index, historical_url in enumerate(preview_image_urls, start=1):
                     st.link_button(f"画像 {image_index} を開く", historical_url)
         if eligibility.lower() == "excluded":
-            st.error(
-                f"出力除外: {exclusion_reason or '出力条件を満たしていません'}。この商品はCSVに含まれません。"
-            )
+            held = review_workflow.review_status(row, sys.modules[__name__], processed=processed) == "要確認"
+            notice = st.warning if held else st.error
+            notice(f"{'出力保留' if held else '出力除外'}: {exclusion_reason or '出力条件を満たしていません'}。この商品はCSVに含まれません。")
         render_preview_metric_cards(
             st,
             build_preview_metric_items(

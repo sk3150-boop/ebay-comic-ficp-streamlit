@@ -252,6 +252,22 @@ with download_slot.container():
         self.assertIn("商品外画像 7件を除外", markup)
         self.assertIn("decision-success", markup)
 
+    def test_summary_and_detail_share_review_holds_and_true_exclusions(self):
+        rows = [
+            {"Scrape Status": "ok", "Listing Eligibility": "Excluded", "Needs Review": "Yes",
+             "Exclusion Reason": "海外タイトルを確認できません", "Title Resolution Status": "failed"},
+            {"Scrape Status": "ok", "Listing Eligibility": "Excluded", "Needs Review": "Yes",
+             "Exclusion Reason": "Missing volumes"},
+            {"Scrape Status": "ok", "Listing Eligibility": "OK", "Needs Review": "No",
+             "Title Resolution Confidence": "low"},
+        ]
+        self.assertEqual(
+            {"total": 3, "processed": 3, "ready": 1, "review": 1, "excluded": 1, "remaining": 0},
+            summarize_ui_rows(pd.DataFrame(rows).fillna("")),
+        )
+        for row, label in zip(rows, ("要確認", "出力除外", "出力可能・注意あり")):
+            self.assertIn(f"<strong>{label}</strong>", build_selected_decision_html(pd.Series(row), processed=True))
+
     def test_uploaded_csv_is_cached_for_query_link_reruns(self):
         fake_st = FakeStreamlit()
         raw = b"Title,PicURL\nOne,https://example.com/image.jpg\n"

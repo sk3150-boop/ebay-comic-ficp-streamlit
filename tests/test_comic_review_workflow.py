@@ -61,6 +61,89 @@ class ReviewWorkflowTests(unittest.TestCase):
         self.assertNotIn("title_overrides", saved["processing"])
         self.assertEqual(45, saved["rollup"]["markup_percent"])
 
+    def test_title_failure_is_review_hold_without_changing_csv_exclusion(self):
+        row = app.apply_processing_diagnostics(pd.Series(_reviewed(**{
+            "Listing Eligibility": "Excluded", "Exclusion Reason": "海外タイトルを確認できません",
+            "Title Resolution Status": "failed", "Title Resolution Confidence": "none",
+        })))
+        before = row.copy(deep=True)
+        self.assertEqual("Yes", row["Needs Review"])
+        self.assertEqual("出品除外", row["Processing Result"])
+        self.assertEqual("要確認", workflow.review_status(row, app))
+        self.assertFalse(app.build_export_eligibility_mask(pd.DataFrame([row])).iloc[0])
+        pd.testing.assert_series_equal(before, row)
+
+    def test_uncertain_count_shipping_and_image_decisions_are_review_holds(self):
+        for reason in workflow.REVIEW_HOLD_REASONS:
+            with self.subTest(reason=reason):
+                row = app.apply_processing_diagnostics(pd.Series(_reviewed(**{
+                    "Listing Eligibility": "Excluded", "Exclusion Reason": reason,
+                })))
+                self.assertEqual("要確認", workflow.review_status(row, app))
+                self.assertFalse(app.build_export_eligibility_mask(pd.DataFrame([row])).iloc[0])
+        blocked_image = app.apply_processing_diagnostics(pd.Series(_reviewed(**{
+            "Image URL Validation Status": "blocked: no same-listing image",
+        })))
+        self.assertEqual("確認が必要なため出品除外", blocked_image["Exclusion Reason"])
+        self.assertEqual("要確認", workflow.review_status(blocked_image, app))
+
+    def test_true_exclusions_remain_excluded_even_when_diagnostics_need_review(self):
+        for reason in (
+            "商品本体の欠巻・欠品・欠損の可能性があるため出品除外",
+            "雑誌・本誌商品の可能性があるため出品除外",
+            "Book count exceeds export limit",
+            "Explicit unsupported product exclusion",
+        ):
+            with self.subTest(reason=reason):
+                row = app.apply_processing_diagnostics(pd.Series(_reviewed(**{
+                    "Listing Eligibility": "Excluded", "Exclusion Reason": reason,
+                    # A stale/secondary title failure cannot override a concrete exclusion.
+                    "Title Resolution Status": "failed", "Title Resolution Confidence": "low",
+                })))
+                self.assertEqual("Yes", row["Needs Review"])
+                self.assertEqual("除外", workflow.review_status(row, app))
+                self.assertFalse(app.build_export_eligibility_mask(pd.DataFrame([row])).iloc[0])
+
+    def test_low_confidence_is_exportable_warning_unless_a_review_hold_exists(self):
+        row = pd.Series(_reviewed(**{
+            "Title Resolution Status": "ai-auto", "Title Resolution Confidence": "low",
+        }))
+        self.assertEqual("注意あり", workflow.review_status(row, app))
+        self.assertTrue(app.build_export_eligibility_mask(pd.DataFrame([row])).iloc[0])
+        row["Needs Review"] = "Yes"
+        self.assertEqual("要確認", workflow.review_status(row, app))
+        self.assertFalse(app.build_export_eligibility_mask(pd.DataFrame([row])).iloc[0])
+        self.assertEqual("出力可能", workflow.review_status(_reviewed(), app))
+        self.assertEqual("未処理", workflow.review_status({"Title": "Not processed"}, app))
+
+    def test_saved_title_failure_status_and_run_counts_use_review_hold_projection(self):
+        run = self.start()
+        row = app.apply_processing_diagnostics(pd.Series(_reviewed(**{
+            "Listing Eligibility": "Excluded", "Exclusion Reason": "海外タイトルを確認できません",
+            "Title Resolution Status": "failed", "Title Resolution Confidence": "none",
+        })))
+        workflow.persist_row(self.st, self.store, run, "file-key", 0, row,
+                             pd.Series({"Title": "Original literal title"}), self.config, app)
+        items, count = self.store.list_items("1", status="要確認")
+        self.assertEqual(1, count)
+        self.assertEqual("要確認", items[0]["summary"]["status"])
+        self.assertEqual("Excluded", items[0]["automatic"]["Listing Eligibility"])
+        self.assertEqual("failed", items[0]["automatic"]["Title Resolution Status"])
+        self.assertEqual("Original literal title", items[0]["original"]["Title"])
+        self.assertEqual({"要確認": 1}, self.store.get_run("1", run["run_id"])["status_counts"])
+
+    def test_stored_minimal_ui_decisions_are_not_rejudged_for_missing_preview_fields(self):
+        for eligibility, needs_review, expected in (
+            ("OK", "No", "出力可能"), ("OK", "Yes", "要確認"),
+            ("Excluded", "Yes", "除外"),
+        ):
+            with self.subTest(eligibility=eligibility, needs_review=needs_review):
+                minimal = {"Scrape Status": "ok", "Listing Eligibility": eligibility, "Needs Review": needs_review}
+                self.assertEqual(expected, workflow.review_status(minimal, app))
+                minimal.pop("Scrape Status")
+                self.assertEqual(expected, workflow.review_status(minimal, app, processed=True))
+                self.assertEqual("未処理", workflow.review_status(minimal, app, processed=False))
+
     def test_row_callback_is_invoked_once_for_success_and_early_exclusions(self):
         frame = pd.DataFrame([
             {"Title": "ONE PIECE Jump Comics Volumes 1-5 Set", "PicURL": IMAGE, "Description": "Manga set"},

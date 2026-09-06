@@ -79,6 +79,85 @@ def _list_navigation_test_app():
         st.text("Detail with hidden list widgets")
 
 
+def _public_tab_navigation_test_app():
+    """Use the real public gate, including its once-per-session cookie iframe."""
+    import streamlit as st
+    from unittest.mock import patch
+    import comic_ficp_streamlit_app as app
+    import comic_review_workflow as workflow
+
+    def history(st, store, workspace_id, adapter):
+        st.toggle("History cards", key="test_history_cards")
+
+    with patch.object(app, "is_public_mode", return_value=True), \
+         patch.object(app, "public_auth_config_status", return_value=(True, "")), \
+         patch.object(app, "public_auth_required", return_value=False), \
+         patch.object(app, "public_database_url", return_value="sqlite:///:memory:"), \
+         patch.object(app, "ensure_public_single_workspace_user", return_value=(True, {"id": 1, "username": "workspace"}, "")), \
+         patch.object(app, "render_global_styles"), \
+         patch.object(app, "render_app_header"), \
+         patch.object(app, "render_history_page", side_effect=history), \
+         patch.object(app, "render_work_page", side_effect=lambda st, store, workspace: st.text("Work page")), \
+         patch.object(workflow, "open_history", return_value=(object(), "1")):
+        app.main()
+
+
+def _transient_gate_tab_test_app(contained):
+    import streamlit as st
+    from unittest.mock import patch
+    import comic_ficp_streamlit_app as app
+
+    with patch.object(app, "is_public_mode", return_value=True), \
+         patch.object(app, "public_auth_config_status", return_value=(True, "")), \
+         patch.object(app, "public_auth_required", return_value=False), \
+         patch.object(app, "public_database_url", return_value="sqlite:///:memory:"), \
+         patch.object(app, "ensure_public_single_workspace_user", return_value=(True, {"id": 1, "username": "workspace"}, "")):
+        if contained:
+            with st.container(key="fixed_gate"):
+                app.render_public_login_gate(st)
+        else:
+            app.render_public_login_gate(st)
+    work, history = st.tabs(["Work", "History"])
+    with history:
+        st.toggle("Cards", key="cards")
+
+
+def _block_paths(node, wanted_type, path=()):
+    found = [path] if getattr(node, "type", None) == wanted_type else []
+    for index, child in getattr(node, "children", {}).items():
+        found.extend(_block_paths(child, wanted_type, (*path, index)))
+    return found
+
+
+class PublicTabIdentityTests(unittest.TestCase):
+    def test_uncontained_once_only_cookie_iframe_moves_tab_delta_path(self):
+        from streamlit.testing.v1 import AppTest
+        app = AppTest.from_function(_transient_gate_tab_test_app, args=(False,)).run()
+        initial = _block_paths(app._tree, "tab_container")
+        app.toggle(key="cards").set_value(True).run()
+        self.assertFalse(app.exception)
+        self.assertNotEqual(initial, _block_paths(app._tree, "tab_container"))
+
+    def test_fixed_gate_keeps_tab_delta_path_when_cookie_iframe_disappears(self):
+        from streamlit.testing.v1 import AppTest
+        app = AppTest.from_function(_transient_gate_tab_test_app, args=(True,)).run()
+        initial = _block_paths(app._tree, "tab_container")
+        self.assertEqual(1, len(initial))
+        app.toggle(key="cards").set_value(True).run()
+        self.assertFalse(app.exception)
+        self.assertEqual(initial, _block_paths(app._tree, "tab_container"))
+
+    def test_real_main_keeps_tab_identity_on_first_public_history_interaction(self):
+        from streamlit.testing.v1 import AppTest
+        app = AppTest.from_function(_public_tab_navigation_test_app).run()
+        initial = _block_paths(app._tree, "tab_container")
+        self.assertEqual(1, len(initial))
+        app.toggle(key="test_history_cards").set_value(True).run()
+        self.assertFalse(app.exception)
+        self.assertEqual(initial, _block_paths(app._tree, "tab_container"))
+        self.assertTrue(app.toggle(key="test_history_cards").value)
+
+
 class HistoryPageTests(unittest.TestCase):
     def setUp(self):
         from comic_review_history import ReviewHistoryStore, ReviewRun

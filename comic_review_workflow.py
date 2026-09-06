@@ -18,6 +18,18 @@ RUNS = "comic_review_runs"
 ROW_RUNS = "comic_review_row_runs"
 ORIGINALS = "comic_review_original_rows"
 
+# Processing uses "Excluded" both for actual listing exclusions and for
+# uncertainty that must hold CSV output until reviewed. This is a presentation
+# distinction only: never relax the application's existing export eligibility.
+REVIEW_HOLD_REASONS = frozenset(reason.casefold() for reason in (
+    "確認が必要なため出品除外",
+    "海外タイトルを確認できません",
+    "Book count unavailable and no complete-set claim",
+    "Series title could not be identified",
+    "Complete-set count reference not found",
+    "Shipping could not be calculated",
+))
+
 
 def safe_settings(config, rollup) -> dict:
     processing = asdict(config)
@@ -27,18 +39,46 @@ def safe_settings(config, rollup) -> dict:
     return {"processing": processing, "rollup": asdict(rollup)}
 
 
-def review_status(row, app) -> str:
-    diagnostics = app.diagnose_processed_row(pd.Series(row))
-    result = str(row.get("Processing Result") or diagnostics["result"])
-    if result == "未処理":
+def review_status(row, app, *, processed: bool | None = None) -> str:
+    """Derive a consistent display status without modifying the saved decision.
+
+    Genuine exclusions also carry ``Needs Review=Yes`` in existing diagnostics,
+    so that flag alone must not turn missing volumes/magazines/limit violations
+    into ordinary review holds. Conversely, a failed title lookup is a hold,
+    even though its safe CSV decision is persisted as ``Excluded``.
+    """
+    clean_row = pd.Series(row, dtype=object).fillna("")
+    diagnostics = app.diagnose_processed_row(clean_row)
+
+    def value(column):
+        return str(clean_row.get(column, "")).strip()
+
+    stored_result = value("Processing Result")
+    has_stored_decision = any(value(column) for column in (
+        "Processing Result", "Listing Eligibility", "Needs Review", "Exclusion Reason",
+    ))
+    # Historical projections can intentionally contain only these decision
+    # fields. Do not redo completeness checks on an incomplete presentation row.
+    result = stored_result or ("" if has_stored_decision else diagnostics["result"])
+    if processed is False or (processed is None and diagnostics["result"] == "未処理"):
         return "未処理"
-    if str(row.get("Exclusion Reason", "")) == "確認が必要なため出品除外":
-        return "要確認"
-    if str(row.get("Listing Eligibility", "")).lower() == "excluded" or result == "出品除外":
+
+    reason = value("Exclusion Reason").casefold()
+    excluded = value("Listing Eligibility").casefold() == "excluded" or result == "出品除外"
+    title_failed = value("Title Resolution Status").casefold() == "failed"
+    needs_review = value("Needs Review").casefold() == "yes" or result == "確認必要"
+
+    if excluded:
+        if reason in REVIEW_HOLD_REASONS or (title_failed and not reason):
+            return "要確認"
         return "除外"
-    if str(row.get("Needs Review", "")).lower() == "yes" or result == "確認必要":
+    if reason in REVIEW_HOLD_REASONS or title_failed:
         return "要確認"
-    if str(row.get("Title Resolution Confidence", "")).lower() == "low" or str(row.get("Processing Severity", "")).lower() in {"warning", "warn", "注意"}:
+    if needs_review:
+        return "要確認"
+    if not has_stored_decision and str(diagnostics.get("needs_review", "")).casefold() == "yes":
+        return "要確認"
+    if value("Title Resolution Confidence").casefold() == "low" or value("Processing Severity").casefold() in {"warning", "warn", "注意"}:
         return "注意あり"
     return "出力可能"
 
