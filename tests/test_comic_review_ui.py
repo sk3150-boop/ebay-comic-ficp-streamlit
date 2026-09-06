@@ -9,6 +9,15 @@ from comic_review_ui import (
 
 
 class ReviewListTests(unittest.TestCase):
+    def test_card_price_hierarchy_and_status_escape(self):
+        from comic_review_ui import card_financials_html
+        result = card_financials_html({"sale_price": "79.4", "source_price": "2000", "shipping": "$25.3", "status": "要確認"})
+        self.assertIn("$79.40", result)
+        self.assertIn("¥2,000", result)
+        self.assertIn("$25.30", result)
+        self.assertIn("review-status warning", result)
+        self.assertNotIn("<script>", card_financials_html({"status": "<script>"}))
+
     def test_history_prices_use_saved_mapping_and_missing_is_not_zero(self):
         from comic_review_ui import _history_list_record, display_price
         record = _history_list_record({"item_id": "a", "settings": {"processing": {"price_col": "Price"}},

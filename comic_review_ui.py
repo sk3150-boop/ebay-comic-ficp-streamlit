@@ -95,6 +95,20 @@ def linked_image_html(image_url: str, url: str) -> str:
     return image
 
 
+def card_financials_html(record: Mapping[str, Any]) -> str:
+    status = _text(record.get("status")) or "未処理"
+    tone = {"出力可能": "ready", "注意あり": "warning", "要確認": "warning", "除外": "excluded"}.get(status, "neutral")
+    shipping = display_price(_text(record.get("shipping")).lstrip("$"), "USD")
+    return (
+        f'<div class="review-status {tone}">{escape(status)}</div>'
+        '<div class="review-prices">'
+        f'<div><span>販売価格 <small>USD</small></span><strong>{display_price(record.get("sale_price"), "USD")}</strong></div>'
+        f'<div><span>仕入れ元 <small>JPY</small></span><strong>{display_price(record.get("source_price"), "JPY")}</strong></div>'
+        f'<div class="review-shipping"><span>送料 <small>USD</small></span><strong>{shipping}</strong></div>'
+        '</div>'
+    )
+
+
 def status_summary(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     counts = Counter(_text(row.get("status")) for row in records)
     return {status: counts[status] for status in STATUSES}
@@ -216,6 +230,24 @@ def render_unified_review_list(
         # Scope responsive columns to this list; other page columns are untouched.
         grid_key = f"{key}_grid"
         st.markdown(f"""<style>
+        .st-key-{grid_key}, .st-key-{grid_key} p, .st-key-{grid_key} span,
+        .st-key-{grid_key} button, .st-key-{grid_key} strong, .st-key-{grid_key} small {{
+            font-family: Arial, "Noto Sans JP", "Yu Gothic", Meiryo, sans-serif !important;
+            letter-spacing: normal !important;
+        }}
+        .st-key-{grid_key} [data-testid="stVerticalBlockBorderWrapper"] {{ background: #fff; border-color: #dce2ef; border-radius: 12px; }}
+        .st-key-{grid_key} .review-status {{ display: inline-block; border-radius: 5px; padding: 3px 9px; font-size: 12px; font-weight: 700; margin: 2px 0 8px; }}
+        .st-key-{grid_key} .ready {{ color:#116757; background:#e4f5ee; }}
+        .st-key-{grid_key} .warning {{ color:#885a08; background:#fff1cf; }}
+        .st-key-{grid_key} .excluded {{ color:#a13042; background:#fce9ed; }}
+        .st-key-{grid_key} .neutral {{ color:#475569; background:#edf1f6; }}
+        .st-key-{grid_key} .review-prices {{ background:#f4f6fc; border-radius:8px; padding:8px 10px; }}
+        .st-key-{grid_key} .review-prices > div {{ display:flex; justify-content:space-between; align-items:baseline; gap:6px; padding:3px 0; }}
+        .st-key-{grid_key} .review-prices span {{ font-size:12px; color:#475569; }}
+        .st-key-{grid_key} .review-prices small {{ font-size:10px; color:#64748b; }}
+        .st-key-{grid_key} .review-prices strong {{ font-size:17px; font-weight:700; color:#172642; font-variant-numeric:tabular-nums; white-space:nowrap; }}
+        .st-key-{grid_key} .review-shipping {{ border-top:1px solid #dde3ef; margin-top:4px; padding-top:6px !important; }}
+        .st-key-{grid_key} .review-shipping strong {{ font-size:13px; font-weight:500; }}
         .st-key-{grid_key} [data-testid="stHorizontalBlock"] {{
             display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem;
         }}
@@ -226,11 +258,12 @@ def render_unified_review_list(
             width: 100%; height: 170px; object-fit: contain; border-radius: 8px;
         }}
         .st-key-{grid_key} [data-testid="stButton"] button {{
-            min-height: 4.3rem; width: 100%; padding: .35rem .5rem; text-align: left;
+            height: 4.6rem; width: 100%; padding: .3rem 0; text-align: left;
+            background: transparent !important; border: 0 !important; box-shadow: none !important; color:#253657 !important;
         }}
         .st-key-{grid_key} [data-testid="stButton"] button p {{
             display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-            overflow: hidden; text-align: left; font-size: .85rem; line-height: 1.3;
+            overflow: hidden; text-align: left; font-size: 14px !important; font-weight:600; line-height: 1.45;
         }}
         .st-key-{grid_key} [data-testid="stCaptionContainer"] {{ margin: 0; }}
         .st-key-{grid_key} [data-testid="stCaptionContainer"] p {{
@@ -242,6 +275,10 @@ def render_unified_review_list(
             }}
         }}
         @media (max-width: 540px) {{
+            .st-key-{grid_key} .review-prices {{ padding:6px; }}
+            .st-key-{grid_key} .review-prices > div {{ flex-wrap:wrap; gap:2px; }}
+            .st-key-{grid_key} .review-prices strong {{ font-size:15px; }}
+            .st-key-{grid_key} .review-prices small {{ display:none; }}
             .st-key-{grid_key} [data-testid="stHorizontalBlock"] {{ gap: .5rem; }}
             .st-key-{grid_key} [data-testid="stImage"] img {{ height: 135px; }}
         }}
@@ -258,13 +295,12 @@ def render_unified_review_list(
                                 st.markdown(linked_image_html(image_url, record.get("source_url", "")), unsafe_allow_html=True)
                             else:
                                 st.markdown('<div style="height:170px;display:grid;place-items:center;color:#64748b">画像なし</div>', unsafe_allow_html=True)
-                            st.caption(f"{_text(record.get('status'))} · 送料 {_text(record.get('shipping')) or '-'}")
-                            st.markdown(f"**販売価格 {display_price(record.get('sale_price'), 'USD')}**  \n仕入れ元価格 {display_price(record.get('source_price'), 'JPY')}")
                             if not source_link(record.get("source_url")):
                                 st.caption("仕入れ元URL未取得")
                             title = _text(record.get("title")) or "商品詳細"
                             if st.button(title, key=f"{key}_card_{record['id']}", help=title, use_container_width=True):
                                 return _text(record["id"])
+                            st.markdown(card_financials_html(record), unsafe_allow_html=True)
                             st.caption(_text(record.get("change_summary")) or "変更なし")
                             if record.get("file_name"):
                                 st.caption(f"{record['file_name']} · {display_timestamp(record.get('created_at'))}")
