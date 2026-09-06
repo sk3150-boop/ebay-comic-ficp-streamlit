@@ -6,6 +6,8 @@ History views consume stored snapshots only; the app adapter is for presentation
 from __future__ import annotations
 
 import base64
+from html import escape
+from decimal import Decimal, InvalidOperation
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from math import ceil
@@ -62,6 +64,37 @@ def image_data_url(image: Mapping[str, Any] | None) -> str:
     return f"data:{mime};base64,{base64.b64encode(image['data']).decode('ascii')}"
 
 
+def source_link(value: Any) -> str:
+    text = _text(value)
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            return ""
+        if parsed.hostname.endswith("mercdn.net") or parsed.path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            return ""
+        return text
+    except ValueError:
+        return ""
+
+
+def display_price(value: Any, currency: str) -> str:
+    try:
+        amount = Decimal(_text(value).replace(",", "").replace("¥", "").replace("￥", "").replace("$", "").replace("円", ""))
+        if not amount.is_finite() or amount < 0:
+            return "未取得"
+        return f"¥{amount:,.0f}" if currency == "JPY" else f"${amount:,.2f}"
+    except InvalidOperation:
+        return "未取得"
+
+
+def linked_image_html(image_url: str, url: str) -> str:
+    image = f'<img src="{escape(image_url, quote=True)}" alt="商品画像" style="width:100%;height:170px;object-fit:contain;border-radius:8px">'
+    safe_url = source_link(url)
+    if safe_url:
+        return f'<a href="{escape(safe_url, quote=True)}" target="_blank" rel="noopener noreferrer" title="仕入れ元ページを開く">{image}</a>'
+    return image
+
+
 def status_summary(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     counts = Counter(_text(row.get("status")) for row in records)
     return {status: counts[status] for status in STATUSES}
@@ -108,6 +141,8 @@ def review_display_frame(records: list[Mapping[str, Any]]) -> pd.DataFrame:
             "判定": f"{STATUS_ICONS.get(_text(row.get('status')), '')} {_text(row.get('status'))}".strip(),
             "変更・確認ポイント": _text(row.get("change_summary")) or "-",
             "送料 USD": _text(row.get("shipping")) or "-",
+            "販売価格 USD（送料転嫁前）": display_price(row.get("sale_price"), "USD"),
+            "仕入れ元価格 JPY": display_price(row.get("source_price"), "JPY"),
             "商品元タイトル": _text(row.get("source_title")) or "-",
             **({"CSV名": _text(row.get("file_name")), "処理日時": display_timestamp(row.get("created_at"))} if row.get("created_at") else {}),
         }
@@ -211,7 +246,7 @@ def render_unified_review_list(
             .st-key-{grid_key} [data-testid="stImage"] img {{ height: 135px; }}
         }}
         </style>""", unsafe_allow_html=True)
-        st.caption("画像を横並びで表示します。タイトルを選ぶと詳細を確認できます。")
+        st.caption("画像を選ぶと仕入れ元を別タブで開きます。タイトルを選ぶと精査詳細を確認できます。価格は精査時の記録で、販売価格は送料転嫁前のCSV価格です。")
         with st.container(key=grid_key):
             for offset in range(0, len(visible), 4):
                 columns = st.columns(4, gap="small")
@@ -220,10 +255,13 @@ def render_unified_review_list(
                         with st.container(border=True):
                             image_url = safe_image_url(record.get("image_url"))
                             if image_url:
-                                st.image(image_url, use_container_width=True)
+                                st.markdown(linked_image_html(image_url, record.get("source_url", "")), unsafe_allow_html=True)
                             else:
                                 st.markdown('<div style="height:170px;display:grid;place-items:center;color:#64748b">画像なし</div>', unsafe_allow_html=True)
                             st.caption(f"{_text(record.get('status'))} · 送料 {_text(record.get('shipping')) or '-'}")
+                            st.markdown(f"**販売価格 {display_price(record.get('sale_price'), 'USD')}**  \n仕入れ元価格 {display_price(record.get('source_price'), 'JPY')}")
+                            if not source_link(record.get("source_url")):
+                                st.caption("仕入れ元URL未取得")
                             title = _text(record.get("title")) or "商品詳細"
                             if st.button(title, key=f"{key}_card_{record['id']}", help=title, use_container_width=True):
                                 return _text(record["id"])
@@ -261,6 +299,10 @@ def render_unified_review_list(
 
 def _history_list_record(item: Mapping[str, Any], image: Mapping[str, Any] | None = None) -> dict[str, Any]:
     summary = item.get("summary") or {}
+    row = item.get("processed") or {}
+    settings = item.get("settings") or {}
+    config = settings.get("processing") or settings.get("config") or settings
+    source_url = summary.get("source_url") or row.get("Inferred Source URL") or row.get(config.get("url_col", "URL"))
     shipping = _text(item.get("shipping_usd"))
     return {
         "id": item["item_id"], "position": item.get("row_id"),
@@ -269,6 +311,9 @@ def _history_list_record(item: Mapping[str, Any], image: Mapping[str, Any] | Non
         "shipping": f"${shipping}" if shipping and not shipping.startswith("$") else shipping,
         "image_url": image_data_url(image), "file_name": item.get("file_name", ""),
         "created_at": item.get("created_at", ""),
+        "sale_price": row.get(config.get("price_col") or "StartPrice", summary.get("sale_price", "")),
+        "source_price": row.get("Source Listing Price", summary.get("source_price", "")),
+        "source_url": source_link(source_url),
         "image_status": item.get("image_status", summary.get("image_status", "")),
     }
 

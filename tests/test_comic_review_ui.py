@@ -9,6 +9,26 @@ from comic_review_ui import (
 
 
 class ReviewListTests(unittest.TestCase):
+    def test_history_prices_use_saved_mapping_and_missing_is_not_zero(self):
+        from comic_review_ui import _history_list_record, display_price
+        record = _history_list_record({"item_id": "a", "settings": {"processing": {"price_col": "Price"}},
+            "processed": {"Price": "231.38", "Source Listing Price": "14,000", "Inferred Source URL": "https://jp.mercari.com/item/m123"}})
+        self.assertEqual("$231.38", display_price(record["sale_price"], "USD"))
+        self.assertEqual("¥14,000", display_price(record["source_price"], "JPY"))
+        for value in ("", None, "nan", "Infinity", "-1", "unknown"):
+            self.assertEqual("未取得", display_price(value, "JPY"))
+        self.assertEqual("¥0", display_price(0, "JPY"))
+        self.assertEqual("https://jp.mercari.com/item/m123", record["source_url"])
+
+    def test_source_image_link_is_external_safe_and_escaped(self):
+        from comic_review_ui import source_link, linked_image_html
+        for value in ("javascript:alert(1)", "data:text/html,test", "https://user:pass@example.com/", "https://static.mercdn.net/a.jpg"):
+            self.assertEqual("", source_link(value))
+        result = linked_image_html('https://example.com/a.jpg?x="', 'https://jp.mercari.com/item/m123?x="')
+        self.assertIn('target="_blank"', result)
+        self.assertIn('rel="noopener noreferrer"', result)
+        self.assertIn('&quot;', result)
+
     def setUp(self):
         self.rows = [
             {"id": "run-b:0", "position": 0, "title": "Cells at Work", "source_title": "はたらく細胞", "status": "注意あり", "file_name": "B.csv", "shipping": "$5"},

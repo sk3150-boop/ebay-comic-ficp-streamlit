@@ -103,6 +103,9 @@ def review_record(row, original, config, app, item_id="", position=0) -> dict:
             "status": review_status(row, app),
             "change_summary": change_summary(dict(original), row, config),
             "shipping_usd": str(row.get("FICP Shipping USD", "")),
+            "sale_price": str(row.get(config.price_col, "")),
+            "source_price": str(row.get("Source Listing Price", "")),
+            "source_url": app.display_source_url(pd.Series(row), config.url_col),
             "shipping": f"${row['FICP Shipping USD']}" if row.get("FICP Shipping USD") else "—",
             "image_url": image_url}
 
