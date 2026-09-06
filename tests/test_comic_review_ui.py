@@ -72,6 +72,8 @@ def _list_navigation_test_app():
     import streamlit as st
     from comic_review_ui import render_unified_review_list
     view = st.radio("View", ["list", "detail"], key="view")
+    if "test_list_cards" not in st.session_state and "test_list_cards__saved" not in st.session_state:
+        st.session_state["test_list_cards"] = False
     if view == "list":
         records = [{"id": f"run:{index}", "title": f"Match {index}", "status": "出力可能"} for index in range(52)]
         render_unified_review_list(st, records, key="test_list")
@@ -129,6 +131,31 @@ def _block_paths(node, wanted_type, path=()):
     return found
 
 
+def _grid_test_app():
+    import streamlit as st
+    from comic_review_ui import render_unified_review_list
+    records = [{"id": f"stable:{i}", "title": f"Manga {i}", "status": "要確認"} for i in range(5)]
+    selected = render_unified_review_list(st, records, key="grid_test", show_filters=False, paginated=False)
+    if selected:
+        st.text("SELECTED " + selected)
+
+
+class GridLayoutTests(unittest.TestCase):
+    def test_default_grid_uses_four_columns_and_preserves_last_item_id(self):
+        from streamlit.testing.v1 import AppTest
+        screen = AppTest.from_function(_grid_test_app).run()
+        self.assertFalse(screen.exception)
+        self.assertTrue(screen.toggle(key="grid_test_cards").value)
+        self.assertEqual(8, len(screen.columns))
+        self.assertEqual(5, len(screen.button))
+        css = "\n".join(element.value for element in screen.markdown)
+        self.assertIn("repeat(4, minmax(0, 1fr))", css)
+        self.assertIn("repeat(2, minmax(0, 1fr))", css)
+        screen.button(key="grid_test_card_stable:4").click().run()
+        self.assertFalse(screen.exception)
+        self.assertIn("SELECTED stable:4", [element.value for element in screen.text])
+
+
 class PublicTabIdentityTests(unittest.TestCase):
     def test_uncontained_once_only_cookie_iframe_moves_tab_delta_path(self):
         from streamlit.testing.v1 import AppTest
@@ -174,7 +201,8 @@ class HistoryPageTests(unittest.TestCase):
 
     def app(self):
         from streamlit.testing.v1 import AppTest
-        return AppTest.from_function(_history_test_app, args=(self.db_url,)).run(timeout=10)
+        screen = AppTest.from_function(_history_test_app, args=(self.db_url,)).run(timeout=10)
+        return screen.toggle(key="comic_review_history_list_cards").set_value(False).run()
 
     def test_history_lists_stored_exports_without_processing(self):
         app = self.app()

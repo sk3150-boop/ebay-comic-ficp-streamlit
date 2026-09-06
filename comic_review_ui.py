@@ -174,21 +174,61 @@ def render_unified_review_list(
     if not visible:
         st.info("この条件に該当する商品はありません。検索文字や判定を変更してください。")
         return None
-    _restore_widget(st, f"{key}_cards", False)
-    cards = st.toggle("カード表示（スマートフォン向け）", key=f"{key}_cards")
+    _restore_widget(st, f"{key}_cards", True)
+    cards = st.toggle("画像グリッド表示", key=f"{key}_cards")
     _remember_widget(st, f"{key}_cards", cards)
     if cards:
-        for record in visible:
-            with st.container(border=True):
-                image_url = safe_image_url(record.get("image_url"))
-                if image_url:
-                    st.image(image_url, width=180)
-                st.markdown(f"**{_text(record.get('status'))}** · 送料 {_text(record.get('shipping')) or '-'}")
-                if st.button(_text(record.get("title")) or "商品詳細", key=f"{key}_card_{record['id']}", use_container_width=True):
-                    return _text(record["id"])
-                st.text(_text(record.get("change_summary")) or "変更・確認ポイントはありません。")
-                if record.get("file_name"):
-                    st.caption(f"{record['file_name']} · {display_timestamp(record.get('created_at'))}")
+        # Scope responsive columns to this list; other page columns are untouched.
+        grid_key = f"{key}_grid"
+        st.markdown(f"""<style>
+        .st-key-{grid_key} [data-testid="stHorizontalBlock"] {{
+            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem;
+        }}
+        .st-key-{grid_key} [data-testid="stColumn"] {{ width: 100%; min-width: 0; }}
+        .st-key-{grid_key} [data-testid="stVerticalBlock"] {{ gap: .4rem; }}
+        .st-key-{grid_key} [data-testid="stImage"] {{ width: 100%; }}
+        .st-key-{grid_key} [data-testid="stImage"] img {{
+            width: 100%; height: 170px; object-fit: contain; border-radius: 8px;
+        }}
+        .st-key-{grid_key} [data-testid="stButton"] button {{
+            min-height: 4.3rem; width: 100%; padding: .35rem .5rem; text-align: left;
+        }}
+        .st-key-{grid_key} [data-testid="stButton"] button p {{
+            display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+            overflow: hidden; text-align: left; font-size: .85rem; line-height: 1.3;
+        }}
+        .st-key-{grid_key} [data-testid="stCaptionContainer"] p {{
+            font-size: .75rem; margin-bottom: 0; overflow-wrap: anywhere;
+        }}
+        @media (max-width: 900px) {{
+            .st-key-{grid_key} [data-testid="stHorizontalBlock"] {{
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }}
+        }}
+        @media (max-width: 540px) {{
+            .st-key-{grid_key} [data-testid="stHorizontalBlock"] {{ gap: .5rem; }}
+            .st-key-{grid_key} [data-testid="stImage"] img {{ height: 135px; }}
+        }}
+        </style>""", unsafe_allow_html=True)
+        st.caption("画像を横並びで表示します。タイトルを選ぶと詳細を確認できます。")
+        with st.container(key=grid_key):
+            for offset in range(0, len(visible), 4):
+                columns = st.columns(4, gap="small")
+                for column, record in zip(columns, visible[offset:offset + 4]):
+                    with column:
+                        with st.container(border=True):
+                            image_url = safe_image_url(record.get("image_url"))
+                            if image_url:
+                                st.image(image_url, use_container_width=True)
+                            else:
+                                st.markdown('<div style="height:170px;display:grid;place-items:center;color:#64748b">画像なし</div>', unsafe_allow_html=True)
+                            st.caption(f"{_text(record.get('status'))} · 送料 {_text(record.get('shipping')) or '-'}")
+                            title = _text(record.get("title")) or "商品詳細"
+                            if st.button(title, key=f"{key}_card_{record['id']}", help=title, use_container_width=True):
+                                return _text(record["id"])
+                            st.caption(_text(record.get("change_summary")) or "変更なし")
+                            if record.get("file_name"):
+                                st.caption(f"{record['file_name']} · {display_timestamp(record.get('created_at'))}")
         return None
     st.caption("画像またはタイトルをクリックすると商品詳細が開きます。一覧に戻っても検索条件とページ位置は残ります。")
     generation_key = f"{key}_table_generation"
