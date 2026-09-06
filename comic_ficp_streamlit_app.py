@@ -28,6 +28,7 @@ import pandas as pd
 
 import comic_review_workflow as review_workflow
 from comic_review_ui import render_history_page, render_unified_review_list
+from comic_review_gallery import render_image_gallery
 
 try:
     import requests
@@ -12713,13 +12714,12 @@ def render_selected_preview(
         else "まだ処理されていません。"
     )
 
-    if archived_image or (image_url and not readonly):
+    if archived_image or image_url:
         image_col_obj, detail_col_obj = st.columns([0.34, 0.66], gap="medium")
         with image_col_obj:
-            with st.container(border=True):
-                st.image(archived_image if archived_image else image_url, use_container_width=True)
-            if not readonly:
-                render_additional_image_gallery(st, additional_image_urls)
+            render_image_gallery(preview_image_urls, archived_image)
+            if readonly and additional_image_urls:
+                st.caption("追加画像は保存時のURLから読み込みます。削除・変更された画像は表示できない場合があります。")
         detail_container = detail_col_obj
     else:
         st.markdown(
@@ -12733,7 +12733,7 @@ def render_selected_preview(
         st.markdown(build_selected_decision_html(row, processed, readonly=readonly), unsafe_allow_html=True)
         if readonly and preview_image_urls:
             with st.expander("処理当時の画像URL", expanded=False):
-                st.caption("保存された画像URLです。リンク先の画像は削除・変更される場合があります。閲覧するまで取得しません。")
+                st.caption("保存された画像URLです。追加画像はプレビューにも表示していますが、リンク先の画像は削除・変更される場合があります。")
                 for image_index, historical_url in enumerate(preview_image_urls, start=1):
                     st.link_button(f"画像 {image_index} を開く", historical_url)
         if eligibility.lower() == "excluded":
