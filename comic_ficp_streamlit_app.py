@@ -10419,7 +10419,8 @@ def render_work_page(st, history_store, workspace_id) -> None:
             )
         with full_col:
             st.caption("CSV全体")
-            st.write(f"処理済みの出力可能 {len(export_frame)}件 / 未処理 {ui_summary['remaining']}件")
+            processed_export_count = sum(row_is_processed(active_frame.loc[index]) for index in export_frame.index)
+            st.write(f"処理済みの出力可能 {processed_export_count}件 / 未処理 {ui_summary['remaining']}件")
             if all_rows_processed and not export_frame.empty:
                 review_workflow.record_export(st, history_store, current_run, export_csv_bytes,
                                               output_name, list(export_frame.index), config, rollup_options, file_key)

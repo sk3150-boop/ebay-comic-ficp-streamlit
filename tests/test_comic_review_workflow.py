@@ -302,6 +302,7 @@ class MainScreenTests(unittest.TestCase):
         full = next(button for button in downloads if button.proto.id.endswith("-comic_ficp_download_top"))
         self.assertFalse(trial.proto.disabled)
         self.assertTrue(full.proto.disabled)
+        self.assertIn("処理済みの出力可能 5件 / 未処理 2件", "\n".join(item.value for item in screen.markdown))
         run = store.list_runs("local")[0]
         self.assertEqual(5, len(store.list_exports("local", run["run_id"])[0]["row_ids"]))
         # Reruns/history rendering are read-only and never repeat the mock AI run.
