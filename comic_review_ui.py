@@ -197,6 +197,7 @@ def render_unified_review_list(
             display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
             overflow: hidden; text-align: left; font-size: .85rem; line-height: 1.3;
         }}
+        .st-key-{grid_key} [data-testid="stCaptionContainer"] {{ margin: 0; }}
         .st-key-{grid_key} [data-testid="stCaptionContainer"] p {{
             font-size: .75rem; margin-bottom: 0; overflow-wrap: anywhere;
         }}
