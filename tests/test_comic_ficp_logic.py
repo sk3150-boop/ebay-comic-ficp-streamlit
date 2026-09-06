@@ -182,18 +182,19 @@ class ComicFicpLogicTest(unittest.TestCase):
         self.assertIn("progress_bar = st.progress", source)
         self.assertIn("render_api_cost_summary", source)
 
-    def test_completed_csv_download_is_promoted_above_step_one(self):
+    def test_csv_downloads_are_grouped_above_full_width_review_list(self):
         source = (ROOT / "comic_ficp_streamlit_app.py").read_text(encoding="utf-8")
 
         priority_slot = source.index("priority_download_slot = st.empty()")
-        step_one = source.index('render_section_heading(st, "STEP 1", "CSVを読み込む"')
-        self.assertLess(priority_slot, step_one)
+        review_list = source.index('st.markdown("### 精査結果")')
+        self.assertLess(priority_slot, review_list)
         self.assertIn('key="comic_ficp_download_top"', source)
-        self.assertIn('key="comic_ficp_download_step5"', source)
+        self.assertIn('key="comic_ficp_download_trial"', source)
         self.assertIn("if all_rows_processed and not export_frame.empty:", source)
-        self.assertIn("保存できる商品が0件です。", source)
-        self.assertIn("with download_slot.container():", source)
-        self.assertNotIn("with download_slot:\n", source)
+        self.assertIn("with priority_download_slot.container():", source)
+        self.assertIn("disabled=not trial_is_current or trial_export_frame.empty", source)
+        self.assertIn("disabled=not all_rows_processed or export_frame.empty", source)
+        self.assertNotIn('key="comic_ficp_download_step5"', source)
 
     def test_download_slot_container_keeps_heading_button_and_caption(self):
         from streamlit.testing.v1 import AppTest

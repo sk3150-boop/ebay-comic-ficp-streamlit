@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import time
 import unicodedata
 from dataclasses import dataclass, field, replace
@@ -24,6 +25,9 @@ from typing import Callable, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
 import pandas as pd
+
+import comic_review_workflow as review_workflow
+from comic_review_ui import render_history_page, render_unified_review_list
 
 try:
     import requests
@@ -1389,7 +1393,7 @@ def revoke_current_public_remember_token(st, database_url: Optional[str] = None)
 def clear_public_session_work_data(st) -> None:
     for key in list(st.session_state.keys()):
         key_text = str(key)
-        if key_text.startswith("comic_ficp_") or key_text.startswith("usd_jpy_"):
+        if key_text.startswith(("comic_ficp_", "usd_jpy_", "comic_review_")):
             st.session_state.pop(key, None)
 
 
@@ -8548,6 +8552,7 @@ def process_dataframe(
     config: ProcessingConfig,
     row_indices: Optional[Iterable[int]] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    row_callback: Optional[Callable[[int, pd.Series], None]] = None,
 ) -> pd.DataFrame:
     output = frame.copy().fillna("")
     target_indices = list(row_indices) if row_indices is not None else list(output.index)
@@ -8779,6 +8784,8 @@ def process_dataframe(
                 row["Description Detail Notes"] = f"Excluded from export CSV: {exclusion.reason}; evidence: {exclusion.evidence}"
                 row = apply_processing_diagnostics(row)
                 output.loc[index, row.index] = row
+                if row_callback:
+                    row_callback(index, row.copy())
                 if progress_callback:
                     progress_callback(position, total, f"出品除外: {title or f'row {index + 1}'}")
                 if config.enable_scrape and config.request_delay_seconds > 0 and position < total:
@@ -8917,6 +8924,8 @@ def process_dataframe(
                 )
                 row = apply_processing_diagnostics(row)
                 output.loc[index, row.index] = row
+                if row_callback:
+                    row_callback(index, row.copy())
                 if progress_callback:
                     progress_callback(position, total, f"excluded: {title or f'row {index + 1}'}")
                 if config.enable_scrape and config.request_delay_seconds > 0 and position < total:
@@ -8984,6 +8993,8 @@ def process_dataframe(
                 )
                 row = apply_processing_diagnostics(row)
                 output.loc[index, row.index] = row
+                if row_callback:
+                    row_callback(index, row.copy())
                 if progress_callback:
                     progress_callback(position, total, f"excluded: {title or f'row {index + 1}'}")
                 if config.enable_scrape and config.request_delay_seconds > 0 and position < total:
@@ -9175,6 +9186,8 @@ def process_dataframe(
 
             row = apply_processing_diagnostics(row)
             output.loc[index, row.index] = row
+            if row_callback:
+                row_callback(index, row.copy())
             if progress_callback:
                 progress_callback(position, total, title or f"row {index + 1}")
             if config.enable_scrape and config.request_delay_seconds > 0 and position < total:
@@ -9537,16 +9550,27 @@ def build_workflow_steps_html(active_step: int) -> str:
 def render_app_header(st) -> None:
     st.markdown(
         """
+        <style>
+        .app-hero {min-height:0!important;padding:20px 28px!important;margin-bottom:18px!important;border-radius:18px!important;box-shadow:0 8px 24px #23245014!important}
+        .app-hero h1 {font-size:clamp(23px,2.3vw,34px)!important;line-height:1.3!important;margin:8px 0!important;letter-spacing:-.025em!important}
+        .app-hero p {font-size:14px!important;margin:0!important;line-height:1.5!important}
+        .hero-eyebrow {font-size:10px!important}
+        .workflow-step {padding:10px 14px!important;min-height:48px!important}
+        .workflow-steps {margin:12px 0 20px!important;gap:10px!important}
+        [data-testid="stTabs"] [role="tab"] {font-size:16px;font-weight:700;padding:14px 24px}
+        [data-testid="stExpander"] {margin-bottom:8px}
+        @media(max-width:600px) {
+          .app-hero {padding:16px!important}.app-hero h1 {font-size:23px!important}
+          .workflow-steps {display:none!important}
+          [data-testid="stTabs"] [role="tab"] {padding:12px 16px}
+        }
+        </style>
         <section class="app-hero">
           <div class="hero-copy">
             <div class="hero-eyebrow"><span></span>EBAY MANGA OPERATIONS</div>
-            <h1>漫画セットCSVを、<br>出品できる状態へ。</h1>
-            <p>画像の安全確認、冊数・重量・FICP送料、Specifics補完まで。<br>迷わず進められる順番で、出品前チェックをひとつにまとめました。</p>
-            <div class="hero-tags">
-              <span>同一商品画像を検証</span><span>要確認を自動抽出</span><span>eBay CSV対応</span>
-            </div>
+            <h1>漫画の出品準備</h1>
+            <p>CSVを精査し、変更内容と判断根拠を記録。</p>
           </div>
-          <div class="hero-emblem" aria-hidden="true"><span>MANGA</span><strong>FICP</strong><small>CSV WORKSPACE</small></div>
         </section>
         """,
         unsafe_allow_html=True,
@@ -9662,10 +9686,33 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     )
     render_global_styles(st)
     render_app_header(st)
+    render_public_login_gate(st)
+    history_store = None
+    workspace_id = "local"
+    try:
+        history_store, workspace_id = review_workflow.open_history(st, sys.modules[__name__])
+    except Exception:
+        st.warning("履歴データベースに接続できません。CSVの作業は続けられますが、履歴保存には接続の復旧が必要です。")
+    review_workflow.render_save_health(st, history_store)
+    work_page, history_page = st.tabs(["CSVを精査", "精査履歴"])
+    with history_page:
+        if history_store is not None:
+            try:
+                render_history_page(st, history_store, workspace_id, sys.modules[__name__])
+            except Exception:
+                st.warning("精査履歴を読み込めませんでした。現在のCSV作業には影響しません。")
+        else:
+            st.info("履歴への接続が復旧すると、保存済みの結果を表示できます。")
+    with work_page:
+        render_work_page(st, history_store, workspace_id)
+
+
+def render_work_page(st, history_store, workspace_id) -> None:
+    completion_notice = st.session_state.pop("comic_review_completion_notice", "")
+    if completion_notice:
+        st.success(completion_notice)
     workflow_slot = st.empty()
     workflow_slot.markdown(build_workflow_steps_html(1), unsafe_allow_html=True)
-    render_public_login_gate(st)
-    priority_download_slot = st.empty()
     title_override_message = st.session_state.pop("comic_ficp_title_override_message", None)
     if isinstance(title_override_message, dict):
         message_text = clean_text(title_override_message.get("text", ""))
@@ -9745,10 +9792,14 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     if selected_index_key not in st.session_state or st.session_state[selected_index_key] not in row_options:
         st.session_state[selected_index_key] = row_options[0]
     if view_key not in st.session_state:
-        st.session_state[view_key] = "選択商品"
+        st.session_state[view_key] = "精査一覧"
+    if st.session_state.pop("comic_review_return_to_list", False):
+        st.session_state[view_key] = "精査一覧"
+    if st.session_state[view_key] not in {"精査一覧", "選択商品", "出力チェック"}:
+        st.session_state[view_key] = "精査一覧"
     apply_query_selected_row(st, row_options, selected_index_key, view_key)
 
-    render_file_summary(st, uploaded_name, len(frame), encoding, active_frame)
+    st.caption(f"{uploaded_name} ｜ {len(frame):,}商品 ｜ 処理済み {initial_ui_summary['processed']:,}件 ｜ {encoding}")
     selected_title_col = st.session_state.get("comic_ficp_title_col", guessed["title_col"])
 
     selected_index = st.selectbox(
@@ -9759,8 +9810,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         help="処理前の確認や、処理後に要確認となった商品を切り替えます。",
     )
 
-    control_col, workspace_col = st.columns([0.36, 0.64], gap="large", vertical_alignment="top")
-    with control_col:
+    with st.expander("設定を変更する（CSV列・送料・取得・AI）", expanded=False):
         url_col = guessed["url_col"] if guessed["url_col"] in options else ""
         image_col = guessed["image_col"] if guessed["image_col"] in options else ""
         title_col = guessed["title_col"] if guessed["title_col"] in options else ""
@@ -10151,13 +10201,19 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             title_overrides=title_overrides,
         )
 
-        render_section_heading(
-            st,
-            "STEP 3",
-            "自動処理",
-            f"選択商品から最大{TRIAL_PROCESSING_BATCH_SIZE}件だけ試すことも、CSV全体をまとめて処理することもできます。",
-        )
-        with st.container(border=True):
+    st.caption(
+        f"現在の設定：Zone {config.zone} ｜ 判定不能時 {config.book_weight_g}g/冊 ｜ "
+        f"予備梱包 {config.packaging_weight_kg:.2f}kg ｜ 為替 {config.exchange_rate_jpy_per_usd:.2f}円/USD ｜ "
+        f"燃油 {config.fuel_surcharge_percent:g}% ｜ AI {'ON' if config.enable_ai_enrichment else 'OFF'}"
+    )
+    render_section_heading(
+        st,
+        "STEP 3",
+        "自動処理",
+        f"選択商品から最大{TRIAL_PROCESSING_BATCH_SIZE}件だけ試すことも、CSV全体をまとめて処理することもできます。",
+    )
+    with st.container(border=True):
+        with st.expander("保存時の送料・価格設定", expanded=False):
             rollup_enabled = st.checkbox("送料を価格に転嫁して送料無料にする", value=True)
             free_shipping_profile_name = st.selectbox(
                 "送料無料ポリシー名",
@@ -10182,30 +10238,31 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                 free_shipping_profile_name=free_shipping_profile_name,
                 markup_percent=float(transfer_markup_percent),
             )
-            run_all_col, run_one_col = st.columns([0.62, 0.38], gap="small")
-            process_all = run_all_col.button(
-                f"全{len(active_frame):,}件をまとめて処理",
-                type="primary",
-                icon=":material/play_arrow:",
+        st.caption(f"送料転嫁 {'ON' if rollup_options.enabled else 'OFF'} ｜ 安全上乗せ {rollup_options.markup_percent:g}% ｜ {rollup_options.free_shipping_profile_name}")
+        run_all_col, run_one_col = st.columns([0.62, 0.38], gap="small")
+        process_all = run_all_col.button(
+            f"全{len(active_frame):,}件をまとめて処理",
+            type="primary",
+            icon=":material/play_arrow:",
+            use_container_width=True,
+        )
+        process_selected = run_one_col.button(
+            f"{TRIAL_PROCESSING_BATCH_SIZE}件だけ試す",
+            type="secondary",
+            icon=":material/science:",
+            use_container_width=True,
+        )
+        with st.expander("処理結果をリセットする", expanded=False):
+            st.caption("処理済みの判定結果を消し、読み込んだ元CSVの状態へ戻します。eBay上の商品には影響しません。")
+            clear_results = st.button(
+                "判定結果を消去して元CSVへ戻す",
+                type="tertiary",
+                icon=":material/restart_alt:",
                 use_container_width=True,
             )
-            process_selected = run_one_col.button(
-                f"{TRIAL_PROCESSING_BATCH_SIZE}件だけ試す",
-                type="secondary",
-                icon=":material/science:",
-                use_container_width=True,
-            )
-            with st.expander("処理結果をリセットする", expanded=False):
-                st.caption("処理済みの判定結果を消し、読み込んだ元CSVの状態へ戻します。eBay上の商品には影響しません。")
-                clear_results = st.button(
-                    "判定結果を消去して元CSVへ戻す",
-                    type="tertiary",
-                    icon=":material/restart_alt:",
-                    use_container_width=True,
-                )
-            feedback_slot = st.empty()
-            api_cost_slot = st.empty()
-            download_slot = st.empty()
+    feedback_slot = st.empty()
+    api_cost_slot = st.empty()
+    priority_download_slot = st.empty()
 
     if clear_results:
         st.session_state["comic_ficp_processed_df"] = frame
@@ -10226,6 +10283,10 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
             else list(active_frame.index)
         )
         total_hint = len(indices)
+        history_run = review_workflow.start_run(
+            st, history_store, workspace_id, file_key, uploaded_name, indices,
+            config, rollup_options, sys.modules[__name__], mode="trial" if process_selected else "all",
+        )
         started_at = time.monotonic()
         workflow_slot.markdown(build_workflow_steps_html(3), unsafe_allow_html=True)
         with feedback_slot.container():
@@ -10253,29 +10314,59 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                     state="running",
                 )
 
-            active_frame = process_dataframe(active_frame, config, row_indices=indices, progress_callback=progress)
-            run_cost_summary = summarize_api_costs(active_frame.loc[indices], config.exchange_rate_jpy_per_usd)
+            completed_indices = []
+
+            def save_completed_row(index, row):
+                completed_indices.append(index)
+                partial = st.session_state["comic_ficp_processed_df"]
+                partial = partial.reindex(columns=partial.columns.union(row.index, sort=False), fill_value="")
+                partial.loc[index, row.index] = row
+                st.session_state["comic_ficp_processed_df"] = partial
+                review_workflow.persist_row(
+                    st, history_store, history_run, file_key, index, row,
+                    frame.loc[index], config, sys.modules[__name__],
+                )
+
+            run_failed = False
+            try:
+                active_frame = process_dataframe(
+                    active_frame, config, row_indices=indices,
+                    progress_callback=progress, row_callback=save_completed_row,
+                )
+            except Exception as error:
+                active_frame = st.session_state["comic_ficp_processed_df"]
+                run_failed = True
+                st.error(f"処理を中断しました。完了済みの結果は保持しています。{redact_sensitive_text(error)}")
+            run_cost_summary = summarize_api_costs(active_frame.loc[completed_indices], config.exchange_rate_jpy_per_usd)
+            review_workflow.finish_run(st, history_store, history_run, run_cost_summary,
+                                       status="interrupted" if run_failed else "completed")
             st.session_state["comic_ficp_last_api_cost_summary"] = run_cost_summary
             st.session_state["comic_ficp_last_api_cost_file_key"] = file_key
             st.session_state["comic_ficp_processed_df"] = active_frame
             if process_selected:
-                st.session_state[LAST_TRIAL_ROW_INDICES_KEY] = list(indices)
+                st.session_state[LAST_TRIAL_ROW_INDICES_KEY] = list(completed_indices)
                 st.session_state[LAST_TRIAL_FILE_KEY] = file_key
             else:
                 st.session_state.pop(LAST_TRIAL_ROW_INDICES_KEY, None)
                 st.session_state.pop(LAST_TRIAL_FILE_KEY, None)
             save_processed_dataframe_cache(active_frame, file_key)
             elapsed_total = time.monotonic() - started_at
-            progress_bar.progress(1.0, text=f"{total_hint}/{total_hint}件（100.0%）")
-            progress_text.success(f"処理が完了しました（{time.strftime('%H:%M:%S')}）。")
-            run_status.update(label=f"処理完了（{format_ui_duration(elapsed_total)}）", state="complete")
+            if not run_failed:
+                progress_bar.progress(1.0, text=f"{total_hint}/{total_hint}件（100.0%）")
+                progress_text.success(f"処理が完了しました（{time.strftime('%H:%M:%S')}）。")
+            run_status.update(label=f"{'処理中断' if run_failed else '処理完了'}（{format_ui_duration(elapsed_total)}）",
+                              state="error" if run_failed else "complete")
             post_summary = summarize_ui_rows(active_frame)
             st.success(
                 f"出力可能 {post_summary['ready']:,}件 / 要確認 {post_summary['review']:,}件 / "
                 f"出力除外 {post_summary['excluded']:,}件"
             )
-        if process_all:
-            st.session_state[view_key] = "投入前チェック"
+        st.session_state[view_key] = "精査一覧"
+        st.session_state["comic_review_completion_notice"] = (
+            f"{'処理を中断' if run_failed else '処理が完了'}しました。出力可能 {post_summary['ready']}件 / "
+            f"要確認 {post_summary['review']}件 / 除外 {post_summary['excluded']}件。完了した商品の精査履歴を記録しました。"
+            if not st.session_state.get(review_workflow.PENDING) else "処理結果は画面に保持されています。履歴未保存のデータは保存を再試行してください。"
+        )
         post_active_step = 4 if post_summary["remaining"] or post_summary["review"] or post_summary["excluded"] else 5
         workflow_slot.markdown(build_workflow_steps_html(post_active_step), unsafe_allow_html=True)
 
@@ -10283,13 +10374,17 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
     last_api_cost_file_key = st.session_state.get("comic_ficp_last_api_cost_file_key")
     if isinstance(last_api_cost_summary, dict) and last_api_cost_file_key == file_key:
         with api_cost_slot.container():
-            render_api_cost_summary(st, last_api_cost_summary)
+            potential_cost_jpy = float(last_api_cost_summary.get("potential_total_cost_jpy", last_api_cost_summary.get("total_cost_jpy", 0)) or 0)
+            with st.expander(f"今回のAPI料金：定価換算 約¥{potential_cost_jpy:,.2f}（検索連携込み・概算）", expanded=False):
+                render_api_cost_summary(st, last_api_cost_summary)
 
     export_frame = build_export_dataframe(active_frame, rollup_options)
     excluded_count = len(active_frame) - len(export_frame)
     ui_summary = summarize_ui_rows(active_frame)
     all_rows_processed = bool(ui_summary["total"]) and ui_summary["remaining"] == 0
-    output_name = f"ebay-comic-ficp-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    current_run = st.session_state.get(review_workflow.RUNS, {}).get(file_key)
+    output_suffix = current_run['run_id'][:12] if current_run else hashlib.sha256(file_key.encode()).hexdigest()[:12]
+    output_name = f"ebay-comic-ficp-{output_suffix}.csv"
     export_csv_bytes = dataframe_to_csv_bytes(export_frame)
     trial_row_indices = st.session_state.get(LAST_TRIAL_ROW_INDICES_KEY, [])
     trial_is_current = (
@@ -10302,66 +10397,63 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
         if trial_is_current
         else active_frame.iloc[0:0].copy()
     )
-    trial_output_name = f"ebay-comic-ficp-trial-{len(trial_row_indices)}items-{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    trial_output_name = f"ebay-comic-ficp-trial-{len(trial_row_indices)}items-{output_suffix}.csv"
     trial_export_csv_bytes = dataframe_to_csv_bytes(trial_export_frame)
-    if trial_is_current and not all_rows_processed:
-        with priority_download_slot.container():
-            render_trial_download_panel(
-                st,
-                trial_export_frame,
-                trial_export_csv_bytes,
-                trial_output_name,
-                len(trial_row_indices),
+    current_run = st.session_state.get(review_workflow.RUNS, {}).get(file_key)
+    with priority_download_slot.container():
+        st.markdown("### CSVを保存")
+        trial_col, full_col = st.columns(2)
+        with trial_col:
+            st.caption("今回の試行分")
+            if trial_is_current:
+                st.write(f"試した {len(trial_row_indices)}件 / 出力可能 {len(trial_export_frame)}件")
+                review_workflow.record_export(st, history_store, current_run, trial_export_csv_bytes,
+                                              trial_output_name, list(trial_export_frame.index), config, rollup_options, file_key)
+            else:
+                st.caption("「5件だけ試す」の完了後に保存できます。")
+            st.download_button(
+                f"試行分のCSVを保存（{len(trial_export_frame)}件）",
+                data=trial_export_csv_bytes, file_name=trial_output_name, mime="text/csv",
+                disabled=not trial_is_current or trial_export_frame.empty, type="primary",
+                key="comic_ficp_download_trial", use_container_width=True,
             )
-    elif all_rows_processed and not export_frame.empty:
-        with priority_download_slot.container():
-            render_priority_download_panel(
-                st,
-                export_frame,
-                export_csv_bytes,
-                output_name,
-                excluded_count,
+        with full_col:
+            st.caption("CSV全体")
+            st.write(f"処理済みの出力可能 {len(export_frame)}件 / 未処理 {ui_summary['remaining']}件")
+            if all_rows_processed and not export_frame.empty:
+                review_workflow.record_export(st, history_store, current_run, export_csv_bytes,
+                                              output_name, list(export_frame.index), config, rollup_options, file_key)
+            st.download_button(
+                f"全件処理のCSVを保存（{len(export_frame)}件）" if all_rows_processed else "全件CSVは残りの処理後に保存",
+                data=export_csv_bytes, file_name=output_name, mime="text/csv",
+                disabled=not all_rows_processed or export_frame.empty, type="primary",
+                key="comic_ficp_download_top", use_container_width=True,
             )
-    elif all_rows_processed:
-        with priority_download_slot.container():
-            with st.container(border=True):
-                st.warning("保存できる商品が0件です。要確認・出力除外の商品と理由を確認してください。")
-    with download_slot.container():
-        render_section_heading(st, "STEP 5", "CSVを保存", "全件処理が終わると、安全確認済みのCSVを保存できます。")
-        if excluded_count:
-            st.warning(f"要確認・出力除外の合計 {excluded_count}件は、ダウンロードCSVから自動で外れます。")
-        if not all_rows_processed:
-            st.info(f"あと {ui_summary['remaining']:,}件です。全件処理後にダウンロードできます。")
+        st.caption("要確認・除外の商品は出力しません。黄色の注意付きでも出力可能な商品は含まれます。元CSVは変更しません。")
         if rollup_options.enabled:
-            rollup_summary = summarize_free_shipping_rollup(export_frame)
-            sum_col1, sum_col2, sum_col3 = st.columns(3)
-            sum_col1.metric("送料無料化する件数", rollup_summary["applied"])
-            sum_col2.metric("スキップ件数", rollup_summary["skipped"])
-            sum_col3.metric("平均転嫁送料", rollup_summary["average_transfer_usd"])
-        st.download_button(
-            "eBay用CSVをダウンロード",
-            data=export_csv_bytes,
-            file_name=output_name,
-            mime="text/csv",
-            type="primary" if all_rows_processed and not export_frame.empty else "secondary",
-            icon=":material/download:",
-            disabled=not all_rows_processed or export_frame.empty,
-            key="comic_ficp_download_step5",
-            use_container_width=True,
-        )
-        if all_rows_processed:
-            st.caption(f"出力対象 {len(export_frame):,}件。元CSVとは別ファイルとして保存されます。")
+            st.caption(f"保存時の送料上乗せ：FICP送料合計 × {1 + rollup_options.markup_percent / 100:.2f} を商品価格に加算。")
+    if process_selected or process_all:
+        st.rerun()
 
-    with workspace_col:
-        render_section_heading(st, "STEP 4", "結果を確認", "要確認と除外候補を先に確認し、問題がなければCSVを保存します。")
+    with st.container():
+        st.markdown("### 精査結果")
         workspace_view = st.radio(
-            "商品確認表示",
-            ["選択商品", "投入前チェック", "処理結果一覧", "処理診断", "除外候補", "CSV全体"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key=view_key,
+            "商品確認表示", ["精査一覧", "選択商品", "出力チェック"],
+            horizontal=True, label_visibility="collapsed", key=view_key,
         )
-        if workspace_view == "選択商品":
+        if workspace_view == "精査一覧":
+            records = [
+                review_workflow.review_record(row, frame.loc[index], config, sys.modules[__name__], str(position), position)
+                for position, (index, row) in enumerate(active_frame.iterrows())
+            ]
+            chosen = render_unified_review_list(st, records, key="comic_review_current_" + hashlib.sha256(file_key.encode()).hexdigest()[:12])
+            if chosen is not None:
+                st.session_state[PREFLIGHT_PENDING_SELECTION_KEY] = int(chosen)
+                st.rerun()
+        elif workspace_view == "選択商品":
+            if st.button("← 精査一覧に戻る", key="comic_review_back_to_list"):
+                st.session_state["comic_review_return_to_list"] = True
+                st.rerun()
             title_override_action = render_selected_preview(
                 st,
                 active_frame.iloc[selected_index],
@@ -10370,8 +10462,10 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                 price_col,
                 image_col,
                 url_col,
+                original_row=frame.iloc[selected_index],
             )
             if title_override_action:
+                before_manual_frame = active_frame.copy()
                 action_name = title_override_action.get("action", "")
                 action_native_title = title_override_action.get("native_title", "")
                 action_resolved_title = title_override_action.get("resolved_series_title", "")
@@ -10415,6 +10509,10 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                         clear_title_resolution_caches()
                         st.session_state["comic_ficp_processed_df"] = active_frame
                         save_processed_dataframe_cache(active_frame, file_key)
+                        review_workflow.record_manual_changes(
+                            st, history_store, workspace_id, file_key, before_manual_frame,
+                            active_frame, config, sys.modules[__name__],
+                        )
                     st.session_state["comic_ficp_title_override_message"] = {
                         "ok": action_ok,
                         "text": action_message,
@@ -10423,7 +10521,7 @@ def main() -> None:  # pragma: no cover - UI smoke-tested manually.
                 except Exception as error:
                     st.warning(f"作品名補正の保存処理に失敗しました: {redact_sensitive_text(error)}")
             render_free_shipping_rollup_preview(st, active_frame.iloc[selected_index], rollup_options)
-        elif workspace_view == "投入前チェック":
+        elif workspace_view == "出力チェック":
             render_ebay_preflight_check(st, active_frame, export_frame, title_col)
         elif workspace_view == "処理結果一覧":
             render_clickable_review_table(st, active_frame, title_col, image_col, url_col)
@@ -12387,7 +12485,7 @@ def render_additional_image_gallery(st, image_urls: list[str]) -> None:
     )
 
 
-def build_selected_decision_html(row: pd.Series, processed: bool) -> str:
+def build_selected_decision_html(row: pd.Series, processed: bool, *, readonly: bool = False) -> str:
     eligibility = get_row_value(row, "Listing Eligibility").lower()
     needs_review = get_row_value(row, "Needs Review").lower() == "yes"
     review_reason = get_row_value(row, "Needs Review Reason")
@@ -12398,17 +12496,17 @@ def build_selected_decision_html(row: pd.Series, processed: bool) -> str:
         decision_tone = "pending"
         decision_label = "未処理"
         decision_detail = "自動処理を実行してください"
-        next_action = "まず1件試すか、全件をまとめて処理"
-    elif eligibility == "excluded":
-        decision_tone = "danger"
-        decision_label = "出力除外"
-        decision_detail = get_row_value(row, "Exclusion Reason") or "出力対象外です"
-        next_action = "除外理由を確認"
+        next_action = "まず5件試すか、全件をまとめて処理"
     elif needs_review:
         decision_tone = "warning"
         decision_label = "要確認"
         decision_detail = review_reason or "判断根拠を確認してください"
         next_action = "要確認の理由を確認"
+    elif eligibility == "excluded":
+        decision_tone = "danger"
+        decision_label = "出力除外"
+        decision_detail = get_row_value(row, "Exclusion Reason") or "出力対象外です"
+        next_action = "除外理由を確認"
     else:
         decision_tone = "success"
         decision_label = "出力可能"
@@ -12439,8 +12537,8 @@ def build_selected_decision_html(row: pd.Series, processed: bool) -> str:
         f'<strong>{html_escape(decision_label)}</strong><small>{html_escape(decision_detail)}</small></div>'
         f'<div class="decision-card decision-{image_tone}"><span>画像安全性</span>'
         f'<strong>{html_escape(image_label)}</strong><small>{html_escape(image_detail)}</small></div>'
-        '<div class="decision-card decision-next"><span>次の操作</span>'
-        f'<strong>{html_escape(next_action)}</strong><small>画面上部のステップに沿って進めます</small></div>'
+        + ('' if readonly else '<div class="decision-card decision-next"><span>次の操作</span>'
+        f'<strong>{html_escape(next_action)}</strong><small>画面上部のステップに沿って進めます</small></div>') +
         "</div>"
     )
 
@@ -12450,6 +12548,7 @@ def render_title_resolution_panel(
     row: pd.Series,
     selected_index: int,
     title_col: str = "Title",
+    *, readonly: bool = False,
 ) -> Optional[dict[str, str]]:
     native_title = get_row_value(row, "Native Series Title")
     status = get_row_value(row, "Title Resolution Status")
@@ -12475,11 +12574,9 @@ def render_title_resolution_panel(
         before_col.write(original_title)
         arrow_col.markdown("<div style='text-align:center;padding-top:1.65rem'>→</div>", unsafe_allow_html=True)
         after_col.caption("補正後")
-        after_col.write(resolved_title)
+        after_col.write(final_ebay_title or resolved_title)
         if final_ebay_title:
-            st.markdown(f"**最終eBay Title（{len(final_ebay_title)}/80文字）**")
-            st.code(final_ebay_title, language="text")
-            st.caption("作品名と巻数を守り、初版・年・作者・帯を優先して80文字以内へ短縮しています。")
+            st.caption(f"最終タイトル {len(final_ebay_title)}/80文字 ｜ 採用作品名: {resolved_title}")
         if creators:
             st.caption(f"確認済み作者・原作者: {creators.replace('|', ' / ')}")
         status_text = f"{status or 'not-evaluated'} / {confidence}"
@@ -12500,36 +12597,39 @@ def render_title_resolution_panel(
                     use_container_width=True,
                 )
 
+        if readonly:
+            return None
         input_key_hash = hashlib.sha256(normalize_native_title_key(native_title).encode("utf-8")).hexdigest()[:12]
-        manual_title = st.text_input(
-            "この作業スペース専用の英語作品名",
-            value="" if resolved_title == "-" else resolved_title,
-            key=f"comic_ficp_manual_title_{selected_index}_{input_key_hash}",
-            help="巻数・Set・Complete・Japaneseは入力せず、英語作品名だけを入力してください。",
-        )
-        save_col, delete_col = st.columns(2, gap="small")
-        if save_col.button(
-            "手動補正を保存して反映",
-            key=f"comic_ficp_save_title_{selected_index}_{input_key_hash}",
-            type="primary",
-            use_container_width=True,
-        ):
-            validation_error = validate_canonical_series_title(manual_title)
-            if validation_error:
-                st.warning(validation_error)
-            else:
-                return {
-                    "action": "save",
-                    "native_title": native_title,
-                    "resolved_series_title": clean_text(manual_title),
-                }
-        if delete_col.button(
-            "保存済み補正を削除",
-            key=f"comic_ficp_delete_title_{selected_index}_{input_key_hash}",
-            use_container_width=True,
-            disabled=status.lower() != "manual",
-        ):
-            return {"action": "delete", "native_title": native_title, "resolved_series_title": ""}
+        with st.expander("作品名を手動修正", expanded=False):
+            manual_title = st.text_input(
+                "この作業スペース専用の英語作品名",
+                value="" if resolved_title == "-" else resolved_title,
+                key=f"comic_ficp_manual_title_{selected_index}_{input_key_hash}",
+                help="巻数・Set・Complete・Japaneseは入力せず、英語作品名だけを入力してください。",
+            )
+            save_col, delete_col = st.columns(2, gap="small")
+            if save_col.button(
+                "手動補正を保存して反映",
+                key=f"comic_ficp_save_title_{selected_index}_{input_key_hash}",
+                type="primary",
+                use_container_width=True,
+            ):
+                validation_error = validate_canonical_series_title(manual_title)
+                if validation_error:
+                    st.warning(validation_error)
+                else:
+                    return {
+                        "action": "save",
+                        "native_title": native_title,
+                        "resolved_series_title": clean_text(manual_title),
+                    }
+            if delete_col.button(
+                "保存済み補正を削除",
+                key=f"comic_ficp_delete_title_{selected_index}_{input_key_hash}",
+                use_container_width=True,
+                disabled=status.lower() != "manual",
+            ):
+                return {"action": "delete", "native_title": native_title, "resolved_series_title": ""}
     return None
 
 
@@ -12541,6 +12641,7 @@ def render_selected_preview(
     price_col: str,
     image_col: str,
     url_col: str,
+    *, readonly: bool = False, original_row=None, archived_image=None,
 ) -> Optional[dict[str, str]]:
     title = first_nonblank(get_row_value(row, title_col), f"Row {selected_index + 1}")
     price = get_row_value(row, price_col)
@@ -12602,12 +12703,13 @@ def render_selected_preview(
         else "まだ処理されていません。"
     )
 
-    if image_url:
+    if archived_image or (image_url and not readonly):
         image_col_obj, detail_col_obj = st.columns([0.34, 0.66], gap="medium")
         with image_col_obj:
             with st.container(border=True):
-                st.image(image_url, use_container_width=True)
-            render_additional_image_gallery(st, additional_image_urls)
+                st.image(archived_image if archived_image else image_url, use_container_width=True)
+            if not readonly:
+                render_additional_image_gallery(st, additional_image_urls)
         detail_container = detail_col_obj
     else:
         st.markdown(
@@ -12618,11 +12720,15 @@ def render_selected_preview(
 
     with detail_container:
         st.subheader(title)
-        title_override_action = render_title_resolution_panel(st, row, selected_index, title_col)
-        st.markdown(build_selected_decision_html(row, processed), unsafe_allow_html=True)
+        st.markdown(build_selected_decision_html(row, processed, readonly=readonly), unsafe_allow_html=True)
+        if readonly and preview_image_urls:
+            with st.expander("処理当時の画像URL", expanded=False):
+                st.caption("保存された画像URLです。リンク先の画像は削除・変更される場合があります。閲覧するまで取得しません。")
+                for image_index, historical_url in enumerate(preview_image_urls, start=1):
+                    st.link_button(f"画像 {image_index} を開く", historical_url)
         if eligibility.lower() == "excluded":
             st.error(
-                "出品除外: 欠巻・欠品・欠損の可能性があるため、この商品はダウンロードCSVから自動で削除されます。"
+                f"出力除外: {exclusion_reason or '出力条件を満たしていません'}。この商品はCSVに含まれません。"
             )
         render_preview_metric_cards(
             st,
@@ -12634,6 +12740,21 @@ def render_selected_preview(
                 shipping_usd=shipping_usd,
             ),
         )
+        title_override_action = render_title_resolution_panel(st, row, selected_index, title_col, readonly=readonly)
+        if original_row is not None:
+            with st.expander("変更前後を比較", expanded=False):
+                changes = []
+                before = dict(original_row)
+                for column in dict.fromkeys([title_col, "ConditionID", "C:Series", price_col, image_col, "Description", *get_specific_columns(row.index)]):
+                    if not column:
+                        continue
+                    old, new = str(before.get(column, "")), str(row.get(column, ""))
+                    if old != new:
+                        changes.append({"項目": column, "変更前": old, "変更後": new})
+                if changes:
+                    st.dataframe(pd.DataFrame(changes), hide_index=True, use_container_width=True)
+                else:
+                    st.caption("元CSVから変更された項目はありません。送料転嫁は保存時に適用されます。")
         with st.expander("送料・判定の詳しい根拠", expanded=False):
             st.markdown(
                 f"""
@@ -12663,24 +12784,25 @@ def render_selected_preview(
                 unsafe_allow_html=True,
             )
 
-    st.markdown('<div class="section-title">メルカリ取得情報</div>', unsafe_allow_html=True)
-    render_source_listing_info(st, row, processed)
-    detail_col1, detail_col2 = st.columns([0.42, 0.58], gap="medium")
-    with detail_col1:
-        st.markdown('<div class="section-title">Description追記</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="result-note"><strong>英語（CSVへ追記）</strong><br>{html_escape(description_display)}</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="result-note"><strong>日本語訳（確認用）</strong><br>{html_escape(description_japanese_display)}</div>',
-            unsafe_allow_html=True,
-        )
-    with detail_col2:
-        st.markdown('<div class="section-title">Specifics補完サマリー</div>', unsafe_allow_html=True)
-        render_specifics_compact_summary(st, row, processed)
-    with st.expander("Specifics項目別チェック（37項目）", expanded=False):
-        render_specifics_review(st, row, processed)
+    with st.expander("商品元情報", expanded=False):
+        render_source_listing_info(st, row, processed)
+    with st.expander("説明・Specificsの変更内容", expanded=False):
+        detail_col1, detail_col2 = st.columns([0.42, 0.58], gap="medium")
+        with detail_col1:
+            st.markdown('<div class="section-title">Description追記</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="result-note"><strong>英語（CSVへ追記）</strong><br>{html_escape(description_display)}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="result-note"><strong>日本語訳（確認用）</strong><br>{html_escape(description_japanese_display)}</div>',
+                unsafe_allow_html=True,
+            )
+        with detail_col2:
+            st.markdown('<div class="section-title">Specifics補完サマリー</div>', unsafe_allow_html=True)
+            render_specifics_compact_summary(st, row, processed)
+        with st.expander("Specifics項目別チェック（37項目）", expanded=False):
+            render_specifics_review(st, row, processed)
     return title_override_action
 
 
