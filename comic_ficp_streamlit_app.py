@@ -52,7 +52,7 @@ except ImportError:  # pragma: no cover - deployment dependency is listed separa
 
 
 APP_TITLE = "eBay Manga CSV FICP Assistant"
-PROCESSING_LOGIC_VERSION = "comic-ficp-2026-09-07-count-text-and-image-v10"
+PROCESSING_LOGIC_VERSION = "comic-ficp-2026-09-07-oversized-exclusion-v11"
 AUTOFILL_MARKER_START = "<!-- comic-ficp-autofill -->"
 AUTOFILL_MARKER_END = "<!-- /comic-ficp-autofill -->"
 API_KEY_STORE_PATH = Path(os.getenv("APPDATA") or Path.home()) / "ComicFicpStreamlit" / "api_keys.json"
@@ -2658,6 +2658,9 @@ def apply_export_unit_type_policy(frame: pd.DataFrame) -> pd.DataFrame:
 
 def build_export_eligibility_mask(frame: pd.DataFrame) -> pd.Series:
     export_mask = pd.Series(True, index=frame.index)
+    for index, row in frame.iterrows():
+        if oversized_issue_for_row(row).excluded:
+            export_mask.at[index] = False
     if "Listing Eligibility" in frame.columns:
         export_mask &= frame["Listing Eligibility"].astype(str).str.strip().str.lower() != "excluded"
     if "Processing Result" in frame.columns:
@@ -3616,7 +3619,36 @@ def detect_unlistable_listing_issue(*texts: object) -> ListingExclusion:
     return ListingExclusion()
 
 
+def detect_oversized_manga_issue(*texts: object) -> ListingExclusion:
+    """Exclude magazine-size books even when only one volume is offered."""
+    for text in texts:
+        source = unicodedata.normalize("NFKC", clean_text(text))
+        # AKIRA book editions: publisher records list B5/B5 variant.
+        # Do not match the given name in Akira Toriyama or a longer word.
+        if re.search(r"(?:^|[\s「『])AKIRA(?=$|[\s」』(\d])", source, re.I) and not re.search(r"\bAkira\s+Toriyama\b", source, re.I):
+            return ListingExclusion(excluded=True, reason="雑誌サイズの大判漫画のため出品除外（1冊でも対象）",
+                evidence="AKIRA: 講談社書誌の判型B5 / https://www.kodansha.co.jp/comic/products/0000002123")
+        for sentence in split_detail_sentences(source):
+            if re.search(r"梱包|発送|封筒|ダンボール|段ボール|掲載|連載|付録|ポスター", sentence):
+                continue
+            if re.search(r"(?:大判|大型|雑誌サイズ).{0,4}(?:ではない|でない|ではありません)", sentence):
+                continue
+            match = re.search(r"(?<![A-Za-z0-9])(?:B[345]|A[34])(?:判|版|変型|変形|サイズ)?(?![A-Za-z0-9])|大判|大型本|雑誌(?:と同じ|くらいの|程度の)?サイズ|\b(?:oversized|magazine[- ]sized?)\b", sentence, re.I)
+            if match:
+                return ListingExclusion(excluded=True, reason="雑誌サイズの大判漫画のため出品除外（1冊でも対象）",
+                    evidence=truncate_text(sentence, 220))
+    return ListingExclusion()
+
+
+def oversized_issue_for_row(row) -> ListingExclusion:
+    return detect_oversized_manga_issue(*(get_row_value(row, column) for column in (
+        "Title", "Source Listing Title", "Source Listing Description", "Source Listing Detail Preview", "C:Format")))
+
+
 def detect_magazine_listing_issue(*texts: object) -> ListingExclusion:
+    oversized = detect_oversized_manga_issue(*texts)
+    if oversized.excluded:
+        return oversized
     source = "\n".join(clean_text(text) for text in texts if clean_text(text))
     if not source:
         return ListingExclusion()
@@ -3714,6 +3746,13 @@ def detect_book_count(text: object) -> tuple[Optional[int], str]:
                 collapsed.append(item)
 
         return collapsed
+
+    # Ranges followed by additional volumes: 1-4, 6 / 1巻-4巻、6巻.
+    for match in re.finditer(r"(?<!\d)(\d{1,3})\s*巻?\s*[-~]\s*(\d{1,3})\s*巻?((?:\s*[,、・&]\s*\d{1,3}\s*巻?)+)", source):
+        start, end = int(match.group(1)), int(match.group(2))
+        extras = [int(number) for number in re.findall(r"\d+", match.group(3))]
+        if 1 <= start <= end <= 300 and all(1 <= number <= 300 for number in extras):
+            add_candidate(130, len(set(range(start, end + 1)) | set(extras)), match.group(0))
 
     # 例: 1-20巻 / 1-20巻セット / 1巻-20巻
     for pattern in (
